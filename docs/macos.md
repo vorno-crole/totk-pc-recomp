@@ -252,8 +252,11 @@ update NSP is needed as well, and an update on a game card does not count: the `
 firmware. The keys file must also reach the update's key generation. 1.0.0 and 1.2.1 share their SDK, so keys that open
 the base should open 1.2.1; 1.4.3 uses a much newer SDK (20.5.22) and needs newer master keys than a set that stops at
 `master_key_0f` (firmware 16). A set reaching `master_key_15` also decrypted the base's ExeFS to the verified hashes, and
-its `header_key` and `master_key_00` to `0f` equal the older set's. That shows the set is sound; only extracting a 1.4.3
-update will prove the generation that update uses.
+its `header_key` and `master_key_00` to `0f` equal the older set's, and it decrypted a 1.4.3 update's ExeFS: `main`,
+`sdk`, `subsdk0`, `rtld` and `main.npdm` all match `expected-v1.4.3.json`.
+
+A 1.4.3 update NSP checked out: version 720896, the file table complete, every NCA's SHA-256 matching its name, and a
+common ticket. Its RomFS has not been merged with the base yet, so the `romfs` hash of `expected-v1.4.3.json` is untested.
 
 ## Status
 
@@ -284,6 +287,6 @@ executable among them, have not run yet.
 | 4. Boot | title screen | needs game files |
 | 5. Play | a stable 60 fps in the open world | needs game files |
 
-The base game dump and keys are verified ([Game files](#game-files)), but no update is on hand. Phases 3 to 5 wait for a
-1.2.1 or 1.4.3 update NSP. Before boot, these are known work: draw triangle fans as lists, and check
+The base game, a 1.4.3 update and keys are verified ([Game files](#game-files)), apart from the merged RomFS. Phases 3 to
+5 can start once the tools of phase 2 run. Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
