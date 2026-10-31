@@ -250,8 +250,10 @@ to run here. Its hash check is the quickest full test of a dump and keys togethe
 The base alone does not build. Only 1.1.1, 1.2.1 and 1.4.3 have patch sets (`recomp/patches-*.txt`), so a cumulative
 update NSP is needed as well, and an update on a game card does not count: the `update` partition of a card holds system
 firmware. The keys file must also reach the update's key generation. 1.0.0 and 1.2.1 share their SDK, so keys that open
-the base should open 1.2.1; 1.4.3 uses a much newer SDK (20.5.22) and will need newer master keys. Keys that stop at
-`master_key_0f` (firmware 16) are probably too old for it, which only the extraction can prove.
+the base should open 1.2.1; 1.4.3 uses a much newer SDK (20.5.22) and needs newer master keys than a set that stops at
+`master_key_0f` (firmware 16). A set reaching `master_key_15` also decrypted the base's ExeFS to the verified hashes, and
+its `header_key` and `master_key_00` to `0f` equal the older set's. That shows the set is sound; only extracting a 1.4.3
+update will prove the generation that update uses.
 
 ## Status
 
