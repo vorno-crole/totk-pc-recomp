@@ -2,6 +2,9 @@
 // Ported from LAS Recomp, runtime/nvn/vulkan/device.c:33-330
 // (https://github.com/peiikai/LASRecomp @ da35b83a9611d046a9a681aae668d7085954d37f, MIT, Copyright (c) 2026 Peiikai),
 // without SDL. The VMA implementation is runtime/vk_vma.cpp (VMA is C++ only).
+#ifdef __APPLE__
+#define VK_ENABLE_BETA_EXTENSIONS   // VK_KHR_portability_subset, which MoltenVK requires a device to enable
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -66,10 +69,30 @@ static void mesa_cache_beside_exe(void) {
     plat_setenv("MESA_SHADER_CACHE_DIR", dir);
 }
 
+#ifdef __APPLE__
+// The Vulkan loader finds a driver through VK_DRIVER_FILES. MoltenVK sits beside the exe (tools/build_game.py), so no
+// environment has to be set up to start the game; a VK_DRIVER_FILES of the user's own wins.
+static void moltenvk_beside_exe(void) {
+    char path[PLAT_PATH_MAX * 2];
+    if (plat_getenv("VK_DRIVER_FILES", path, sizeof path)) return;
+    int len = plat_exe_path(path, sizeof path - 32);
+    char *cut = len ? plat_last_sep(path) : NULL;
+    if (!cut) return;
+    strcpy(cut + 1, "MoltenVK_icd.json");
+    if (plat_file_exists(path)) plat_setenv("VK_DRIVER_FILES", path);
+}
+#endif
+
 static int create_instance(void) {
     mesa_cache_beside_exe();
+#ifdef __APPLE__
+    moltenvk_beside_exe();
+#endif
     const char *ext[12];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
+#ifdef __APPLE__
+    ext[n_ext++] = VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME;
+#endif
     const char *layers[] = {"VK_LAYER_KHRONOS_validation"};
     int validate = cfg_bool("TOTK_VK_VALIDATION");
     if (validate && !layer_present(layers[0])) {
@@ -83,6 +106,9 @@ static int create_instance(void) {
     VkApplicationInfo app = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "TotK Recomp",
                              .pEngineName = "TotK Recomp", .apiVersion = VK_API_VERSION_1_3};
     VkInstanceCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &app,
+#ifdef __APPLE__
+                               .flags = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR,
+#endif
                                .enabledExtensionCount = n_ext, .ppEnabledExtensionNames = ext,
                                .enabledLayerCount = validate ? 1 : 0, .ppEnabledLayerNames = layers};
     rdoc_init();
@@ -217,6 +243,9 @@ typedef struct {
     VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT gpl;
     VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT fbl;
     VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr;
+#ifdef __APPLE__
+    VkPhysicalDevicePortabilitySubsetFeaturesKHR port;
+#endif
 } FeatureChain;
 
 static int create_device(void) {
@@ -236,6 +265,12 @@ static int create_device(void) {
     CHAIN(f12, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES);
     CHAIN(f13, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES);
     CHAIN(clip, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT);
+#ifdef __APPLE__
+    if (has_ext(ep, ne, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME)) {
+        ext[n_ext++] = VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME;
+        CHAIN(port, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PORTABILITY_SUBSET_FEATURES_KHR);
+    }
+#endif
 #define OPTIONAL_EXT(flag, name, member, stype) do { \
         if (has_ext(ep, ne, name)) { g_vk.flag = 1; ext[n_ext++] = name; CHAIN(member, stype); } } while (0)
     OPTIONAL_EXT(has_custom_border_color, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, cbc, VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT);
@@ -310,7 +345,9 @@ static int create_device(void) {
     else if (!h->shaderInt64) miss = "shaderInt64";
     else if (!h->samplerAnisotropy) miss = "samplerAnisotropy";
     else if (!h->independentBlend) miss = "independentBlend";
+#ifndef __APPLE__   // Metal has no geometry stage, and no pipeline here uses one: they are vertex and fragment only
     else if (!h->geometryShader) miss = "geometryShader";
+#endif
     else if (!h->textureCompressionBC) miss = "textureCompressionBC";
     if (miss) { rt_log("vk: required feature missing on %s: %s", g_vk.props.deviceName, miss); free(c); return 0; }
     if (!c->fault.deviceFault) g_vk.has_device_fault = 0;   // vkGetDeviceFaultInfoEXT needs the feature, not just the extension

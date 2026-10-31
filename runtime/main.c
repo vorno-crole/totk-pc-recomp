@@ -505,7 +505,13 @@ static void portable_paths(RtConfig *c) {
     c->profile = portable_path(exe, "TOTK_PROFILE_DIR", "profile", NULL, pp_profile, sizeof pp_profile, c->profile);
 }
 
-int main(int argc, char **argv) {
+#ifdef __APPLE__
+#define main_game main_on_game_thread
+#else
+#define main_game main
+#endif
+
+int main_game(int argc, char **argv) {
     mem_init();   // first: claim the guest address space before anything else can land there; reads totk.ini
     // The build that wrote the log, at its top: an attached log from another install or version shows at a glance.
     rt_log("version: TotK Recomp %s, game %d.%d.%d", rt_port_version, rt_game_version / 100, rt_game_version / 10 % 10,
@@ -590,3 +596,22 @@ int main(int argc, char **argv) {
     if (!strcmp(mode, "--boot")) { cfg.boot = 1; rt_boot(); return 0; }
     return usage(argv[0]);
 }
+
+#ifdef __APPLE__
+void gfx_window_main_thread(void);   // gfx_window_sdl.c
+
+static struct { int argc; char **argv; } main_args;
+
+static void game_thread(void *arg) {
+    (void)arg;
+    plat_exit(main_on_game_thread(main_args.argc, main_args.argv));
+}
+
+// AppKit needs the first thread for the window, so everything else runs on a thread of its own.
+int main(int argc, char **argv) {
+    main_args.argc = argc, main_args.argv = argv;
+    if (!plat_thread_spawn(game_thread, NULL, "main", 0)) return 1;
+    gfx_window_main_thread();
+    return 0;
+}
+#endif

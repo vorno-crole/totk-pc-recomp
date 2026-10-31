@@ -3,6 +3,9 @@
 Writes build/<version>/build.ninja and runs MSYS2 UCRT64 Ninja on it. Ninja keeps the build incremental: a chunk is
 recompiled only when it, a header it includes or its flags change.
 
+On macOS (Intel, docs/macos.md) they make build/<version>/totk with Homebrew's LLVM and lld, platform/macos.c, the
+SDL window, and MoltenVK copied beside the executable.
+
 On Linux the same steps make build/<version>/totk with the clang, lld and ninja on PATH (or the clang and lld in --toolchain DIR/bin): the
 runtime's *_sdl.* and platform/linux.c take the place of its *_win.*, platform/win32.c and totk.rc, the libraries are
 the system's (Vulkan, SDL3, Opus, libvpx, zstd; libstdc++ static), and the executable finds a libSDL3.so.0 beside it
@@ -74,6 +77,7 @@ from build_shaders import stale as stale_shaders
 from check_content import GENERATED_MARKER
 
 WIN = os.name == 'nt'
+MAC = sys.platform == 'darwin'
 if not WIN:
     import resource
 ROOT = Path(__file__).resolve().parent.parent
@@ -90,7 +94,8 @@ def on_path(name):
     return Path(found) if found else Path('/usr/bin') / name
 
 
-CLANG = UCRT / 'clang.exe' if WIN else on_path('clang')
+HOMEBREW_LLVM = Path('/usr/local/opt/llvm/bin')   # Intel Homebrew; Apple's clang is a different compiler family
+CLANG = UCRT / 'clang.exe' if WIN else HOMEBREW_LLVM / 'clang' if MAC else on_path('clang')
 NINJA = UCRT / 'ninja.exe' if WIN else on_path('ninja')
 SDL3_DLLS = [UCRT / 'SDL3.dll', UCRT / 'libiconv-2.dll', UCRT / 'libopus-0.dll'] if WIN else []
 
@@ -147,6 +152,14 @@ if WIN:
     LINK_FLAGS = ['-fuse-ld=lld', '-Wl,--stack,16777216', '-Xlinker', '"--Map=$builddir/totk.map"']   # the map feeds tools/prof_report.py
     LINK_LIBS = ['-lpsapi', '-lbcrypt', '-lvulkan-1', '-luser32', '-lgdi32', '-ldwmapi', '-limm32', '-lwinmm', '-lole32', '-lshell32', '-luuid', '-lSDL3', '-lopus', '-l:libvpx.a', '-l:libzstd.a', '-l:libstdc++.a', '-l:libwinpthread.a']   # Vulkan back end; libvpx static (movies); libzstd static (resolution.c)
     VMA_INCLUDE = UCRT.parent / 'include' / 'vma'   # vk_mem_alloc.h; MSYS2 package vulkan-memory-allocator
+elif MAC:
+    # Mach-O is PIE: dispatch slots are offsets, and the loader rebases the function tables. 14.4 for os_sync_wait_on_address.
+    MAC_MIN = '-mmacosx-version-min=14.4'
+    GEN_FLAGS.append(MAC_MIN)
+    RT_FLAGS += [MAC_MIN, '-I/usr/local/include']   # Homebrew LLVM does not search Homebrew's own headers
+    LINK_FLAGS = ['-fuse-ld=lld', MAC_MIN, "'-Wl,-rpath,@executable_path'", '-L/usr/local/lib', '"-Wl,-map,$builddir/totk.map"']
+    LINK_LIBS = ['-lvulkan', '-lSDL3', '-lopus', '-lvpx', '-lzstd', '-lc++', '-lm', '-lpthread']
+    VMA_INCLUDE = Path('/usr/local/include')
 else:
     # -no-pie: the lifted modules' function tables (hundreds of thousands of pointers) need no load-time relocation.
     # $ORIGIN: a libSDL3.so.0 next to totk comes before the system's (the release's portable folder).
@@ -189,7 +202,7 @@ DEFAULT_DEPS = ROOT / 'toolchain' / 'deps-mingw'
 # functions sit on it). mouse_direct.c also registers host callbacks relative to that version's patch page.
 INSTALL_SIDE = {'romfs.c', 'patches.c', 'ov_zstd.c', 'mouse_direct.c'}
 LIB_NAME = 'libtotkrt.a'
-AR = UCRT / 'llvm-ar.exe' if WIN else on_path('llvm-ar')
+AR = UCRT / 'llvm-ar.exe' if WIN else HOMEBREW_LLVM / 'llvm-ar' if MAC else on_path('llvm-ar')
 WINDRES = UCRT / 'windres.exe'   # runtime/totk.rc: the manifest of totk.exe
 TOOLCHAIN_BIN = None   # llvm-mingw bin directory, set by main() for --toolchain
 DEPS = None            # the deps directory of an llvm-mingw build
@@ -308,11 +321,11 @@ RUNTIME = ROOT / 'runtime'   # --runtime: a copy of runtime/ lets a task build w
 
 def other_os(name):
     """A runtime file for another OS: Win32 ones (*_win.*, platform/win32.c, totk.rc) off Windows, the SDL window's
-    (*_sdl.*) and platform/linux.c on Windows."""
+    (*_sdl.*) and the POSIX platform files on Windows, and the other POSIX platform file on Linux and macOS."""
     stem = name.rsplit('.', 1)[0]
     if WIN:
-        return stem.endswith('_sdl') or name == 'linux.c'
-    return stem.endswith('_win') or name in ('win32.c', 'totk.rc')
+        return stem.endswith('_sdl') or name in ('linux.c', 'macos.c')
+    return stem.endswith('_win') or name in ('win32.c', 'totk.rc', 'linux.c' if MAC else 'macos.c')
 
 
 def runtime_sources(skip=()):
@@ -664,7 +677,7 @@ def run_measured(cmd, env):
     if not WIN:
         t0 = time.monotonic()
         code = subprocess.call(cmd, cwd=ROOT, env=env)
-        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * 1024   # KiB on Linux
+        peak = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss * (1 if MAC else 1024)   # bytes on macOS, KiB on Linux
         return code, time.monotonic() - t0, peak, 0
     k32 = ctypes.WinDLL('kernel32', use_last_error=True)
     k32.CreateJobObjectW.restype = wt.HANDLE
@@ -699,6 +712,8 @@ def run_measured(cmd, env):
 
 
 def total_ram():
+    if MAC:
+        return int(subprocess.check_output(['sysctl', '-n', 'hw.memsize']))
     if not WIN:
         return os.sysconf('SC_PAGE_SIZE') * os.sysconf('SC_PHYS_PAGES')
 
@@ -966,6 +981,15 @@ def main():
         return
     for dll in dlls:   # dynamic SDL3 (zlib) and its libiconv (LGPL, unmodified DLL), found next to totk.exe
         shutil.copy2(dll, exe.parent / dll.name)
+    if MAC:
+        # vk_device.c moltenvk_beside_exe points the Vulkan loader at this ICD. 1.4.2 or newer: Homebrew's Intel bottle is
+        # 1.2.11, Vulkan 1.2, and refuses imported host memory.
+        moltenvk = Path(os.environ.get('TOTK_MOLTENVK', '/usr/local/opt/molten-vk/lib/libMoltenVK.dylib'))
+        shutil.copy2(moltenvk, exe.parent / moltenvk.name)
+        (exe.parent / 'MoltenVK_icd.json').write_text(json.dumps({'file_format_version': '1.0.0', 'ICD': {
+            'library_path': f'./{moltenvk.name}', 'api_version': '1.4.0', 'is_portability_driver': True}}, indent=4) + '\n')
+        print(f'{below_root(exe)}: file {mib(exe.stat().st_size)}')
+        return
     sections, image = pe_sections(exe) if WIN else elf_sections(exe)
     print(f'{below_root(exe)}: file {mib(exe.stat().st_size)}, '
           f'image {mib(image)}; ' + ', '.join(f'{k} {mib(v)}' for k, v in sections.items() if k.startswith('.') and v))
