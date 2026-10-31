@@ -284,6 +284,12 @@ Problems the first runs showed:
   MoltenVK's newer sources no longer has this message and defaults heaps on, so building it is an option.
 - **More than 16 samplers.** Two pipelines fail with `'sampler' attribute parameter is out of bounds: must be between 0
   and 15`. Metal allows 16 sampler bindings a stage outside argument buffers, and push descriptors bind directly here.
+- **Streaks on the title screen.** Faces around the mural show long streaks fanning out from the centre, and a green ribbon is
+  cut by a straight diagonal. Not yet known whether this is a bug or how the scene was authored: nothing to compare with.
+  Ruled out with `TOTK_DUMP`: geometry (depth is clean), texture data (the 3686x3686 BC1 mural and the planks are intact,
+  and the mural draws crisp on the faces facing the camera), vertex attribute alignment (offsets and strides of the UV streams
+  are multiples of 4), and anisotropy (forcing 16x changes nothing). Not yet checked: what the streaked draws' shaders compute
+  for their UVs (`TOTK_DUMP_UBO=1`), and the effect of the failed 3D images on them.
 - **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
   affects every frame's pacing, and is the first thing to look at for the frame rate.
 
