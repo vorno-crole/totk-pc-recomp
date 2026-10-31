@@ -229,17 +229,41 @@ The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the com
 
 ## macOS (in progress)
 
-Intel Macs only, macOS 14.4 or later, Vulkan through MoltenVK 1.4.2 or newer. The findings, the state of the port and
-what has not run yet are in [macos.md](macos.md).
+Intel Macs only, macOS 14.4 or later, Vulkan through MoltenVK 1.4.2 or newer. Tested on one machine with 1.4.3; the findings,
+the state of the port and what has not run yet are in [macos.md](macos.md). Use the `macos-intel` branch of
+[this fork](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel).
 
 ```sh
-brew install llvm lld ninja sdl3 opus libvpx zstd vulkan-headers vulkan-loader molten-vk
-brew install uv && brew install --cask dotnet-sdk
+brew install llvm lld ninja sdl3 opus libvpx zstd vulkan-headers vulkan-loader molten-vk uv
+brew install --cask dotnet-sdk
 ```
 
-Homebrew's Intel bottle of `molten-vk` may be 1.2.11, which is too old: `TOTK_MOLTENVK` names a newer `libMoltenVK.dylib`.
-The steps are the Linux ones. `build_game.py` takes Homebrew's clang from `/usr/local/opt/llvm/bin`, and copies MoltenVK
-and its ICD beside `totk`, which points the Vulkan loader there.
+`brew info molten-vk` should show 1.4.2 or newer. `TOTK_MOLTENVK` names another `libMoltenVK.dylib`. 1.2.x is too old: it reports
+Vulkan 1.2. Copy `config.example.toml` to `config.local.toml` and set the paths. On a dump in a folder (MIG Flash), `base` is
+the `ROM.xci` inside it. Extract to a local disk: the update merge copies 17 GB and reads the image often.
+
+From the repository root:
+
+```sh
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -r tools/requirements.txt
+uv venv --python 3.14 .venv-py314
+uv pip install --python .venv-py314/bin/python -r tools/requirements-py314.txt
+.venv/bin/python tools/build_hactool.py
+.venv/bin/python tools/build_xlate.py
+sh tools/fetch_refs.sh
+.venv-py314/bin/python tools/extract.py
+.venv/bin/python recomp/gen.py --exefs build/extracted/v143/exefs --out generated/v143 --patches recomp/patches-v143.txt
+.venv-py314/bin/python tools/make_romfs_patches.py --version v143
+.venv/bin/python tools/build_game.py --version v143
+cd build/v143 && ./totk
+```
+
+On 8 cores the lift takes about 80 s, the compile 9 minutes and the link 2 s; later runtime changes rebuild in seconds.
+`build_game.py` takes Homebrew's clang from `/usr/local/opt/llvm/bin`, so `/opt/homebrew` does not work, and copies MoltenVK and
+its ICD beside `totk`, which points the Vulkan loader there. Saves go to `build/profile-v143`.
+
+`tools/prepare_shaders.py` has not been run on macOS, so shaders compile during play.
 
 ## Checks
 
