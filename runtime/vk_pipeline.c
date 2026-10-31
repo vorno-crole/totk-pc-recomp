@@ -601,9 +601,20 @@ static void vertex_input(const VkPipeState *s, VtxInput *v) {
     for (uint32_t b = 0; b < 16; b++) {
         if (!(streams >> b & 1)) continue;
         uint32_t div = s->vstream[b].divisor;
+#ifdef __APPLE__
+        VkValign va;
+        int aligned = vk_valign_layout(s->vattr, (int)b, s->vstream[b].stride, &va);
+        for (uint32_t i = 0; aligned && i < v->n_attr; i++)
+            if (v->a[i].binding == b) v->a[i].offset = vk_valign_offset(&va, (int)v->a[i].location, v->a[i].offset);
+#endif
         if (div > 1) LOG_ONCE("vk_pipeline: instance divisor %u treated as 1 (no VK_EXT_vertex_attribute_divisor)", div);
         v->b[v->n_bind++] = (VkVertexInputBindingDescription2EXT){
-            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, .binding = b, .stride = s->vstream[b].stride,
+            .sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT, .binding = b,
+#ifdef __APPLE__
+            .stride = aligned ? va.stride : s->vstream[b].stride,
+#else
+            .stride = s->vstream[b].stride,
+#endif
             .inputRate = div ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX, .divisor = 1};
     }
     if (zero)

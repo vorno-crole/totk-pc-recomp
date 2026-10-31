@@ -60,6 +60,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `VK_EXT_conditional_rendering`, `VK_EXT_transform_feedback` | no | only buffer usage flags depend on them |
 | `VK_EXT_device_fault`, `VK_AMD_buffer_marker` | no | a lost device gives no report |
 | `imageView2DOn3DImage` (portability) | no | 3D render targets fail, see [First boot](#first-boot) |
+| `minVertexInputBindingStrideAlignment` (portability) | 4 | `vk_valign.c` copies streams that break it, see [Vertex streams](#vertex-streams) |
 | `triangleFans` (portability) | true but slow | MoltenVK emulates fans with compute passes, see below |
 | `maxMemoryAllocationSize`, `maxBufferSize` | 3.5 GiB | one pool or buffer above it fails |
 | Samplers per stage, direct binding | 16 | two pipelines exceed it, see [First boot](#first-boot) |
@@ -276,7 +277,27 @@ The game reaches the title screen and animates it. On the title, about 44 fps, G
 `--seconds S` counts world time from the save's first frame, so at the title it never ends, and `--shot` never fires. Use
 `TOTK_SHOTS=300-3300:600 TOTK_SHOTS_DIR=<dir> TOTK_SHOTS_FULL=1`.
 
-Problems the first runs showed:
+### Vertex streams
+
+The first title screen had long streaks fanning out from the centre, and it looked plausible until the user reported it. Zelda
+Wiki's capture of the real screen shows a flat, bright mural wall. MoltenVK's limit is the cause: on this GPU family
+`vertexStrideAlignment` is 4, and Metal wants attribute offsets in multiples of 4 as well. The title's skinned meshes have
+strides of 6, 10 and 14 with bone indices and weights at +6, +9 and +10. MoltenVK reports a bad stride only when it is static.
+The runtime's is dynamic, so nothing warned, and Metal read garbage. Vertices flew off, and the triangles they stretched smeared
+their textures.
+
+`runtime/vk_valign.c` gives such a stream a copy with aligned attributes, and fills in the `w` of RGB16 positions, which the
+runtime maps to RGBA16. The title needs 32 copies, 0.2 MiB.
+
+Two wrong turns to avoid repeating: a smooth depth buffer does not prove the geometry right (it was smooth and wrong), and
+checking only the UV stream's alignment missed the skinning streams. Compare with a reference early. Forcing 16x anisotropy
+changed nothing, and the texture data was correct throughout.
+
+The title is still darker and less orange than the reference, which may be the camera's position or the failed 3D images
+below.
+
+### What else the first runs showed
+
 
 - **3D render targets fail.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) fail with `MTLHeap must be enabled
   to create 2D-on-3D or block texel view compatible images`, retried every frame. `MVK_CONFIG_USE_MTLHEAP=1` did not help on
@@ -284,12 +305,6 @@ Problems the first runs showed:
   MoltenVK's newer sources no longer has this message and defaults heaps on, so building it is an option.
 - **More than 16 samplers.** Two pipelines fail with `'sampler' attribute parameter is out of bounds: must be between 0
   and 15`. Metal allows 16 sampler bindings a stage outside argument buffers, and push descriptors bind directly here.
-- **Streaks on the title screen.** Faces around the mural show long streaks fanning out from the centre, and a green ribbon is
-  cut by a straight diagonal. Not yet known whether this is a bug or how the scene was authored: nothing to compare with.
-  Ruled out with `TOTK_DUMP`: geometry (depth is clean), texture data (the 3686x3686 BC1 mural and the planks are intact,
-  and the mural draws crisp on the faces facing the camera), vertex attribute alignment (offsets and strides of the UV streams
-  are multiples of 4), and anisotropy (forcing 16x changes nothing). Not yet checked: what the streaked draws' shaders compute
-  for their UVs (`TOTK_DUMP_UBO=1`), and the effect of the failed 3D images on them.
 - **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
   affects every frame's pacing, and is the first thing to look at for the frame rate.
 

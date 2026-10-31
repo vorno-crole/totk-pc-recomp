@@ -303,6 +303,16 @@ int vk_mem_resolve(uint64_t addr, uint64_t size, VkMemSpan *out);   // 1 when al
 // Changes whenever vk_mem_resolve plus VK_MEM_USE may give another span for an address: a pool added, finalized or
 // mapped, a mirror created, refused or forgotten, a submission started.
 uint64_t vk_mem_gen(void);
+#ifdef __APPLE__
+// Aligned copies of vertex streams Metal cannot read (vk_valign.c). vk_valign_layout: 1 when the stream needs one, with
+// the copy's layout in *out.
+typedef struct { uint8_t attr; uint8_t copy, bytes, pad; uint16_t src, dst; uint16_t w; } VkValignAttr;
+typedef struct { uint32_t stride_in, stride; int n; VkValignAttr a[16]; } VkValign;
+int vk_valign_layout(const uint32_t vattr[16], int stream, uint32_t stride, VkValign *out);
+uint32_t vk_valign_offset(const VkValign *v, int attr, uint32_t offset);   // where attribute attr sits in the copy
+int vk_valign_buffer(uint64_t addr, uint64_t size, const VkValign *v, VkBuffer *buf, VkDeviceSize *bytes);
+void vk_valign_shutdown(void);
+#endif
 // Page write generations over guest memory (mem_written_pages plus vk_guest_written). Returns 1 when a page of the
 // range was written after generation `since`, 0 when not, -1 when the range is not write-watched (treat as written);
 // *now is the generation to pass next time.

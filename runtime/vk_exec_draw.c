@@ -432,6 +432,9 @@ static void twins_release(VkCtx *c);
 void vk_exec_draw_shutdown(void) {
     if (!Z.ready) return;
     VkCtx *c = vk_ctx();
+#ifdef __APPLE__
+    vk_valign_shutdown();
+#endif
     twins_release(c);
     for (int i = 0; i < DV_COUNT; i++) {
         if (Z.img[i].sview != Z.img[i].view) vkDestroyImageView(c->device, Z.img[i].sview, NULL);
@@ -2075,6 +2078,18 @@ static void bind_vertex_buffers(VkExec *ex) {
         if (b == VK_PIPE_ZERO_BINDING || !(used >> b & 1)) continue;
         res |= 1u << b;
         const NVNbufferRange *r = &ex->vbuf[b];
+#ifdef __APPLE__
+        VkValign va;
+        if (vk_valign_layout(ex->pipe.vattr, b, (uint32_t)vstr[b], &va)) {   // another stream's copy: never the shortcut
+            VkMemSpan sp;
+            vstr[b] = va.stride;
+            if (!r->address || !vk_mem_resolve(r->address, 1, &sp)) continue;
+            uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
+            if (vk_valign_buffer(r->address, n, &va, &vb[b], &vsz[b])) continue;
+            vb[b] = Z.zbuf, vsz[b] = ZERO_BYTES;
+            continue;
+        }
+#endif
         if (same_gen && (B.vres >> b & 1) && B.vin[b].address == r->address && B.vin[b].size == r->size) {
             vb[b] = B.vb[b], vo[b] = B.vo[b], vsz[b] = B.vsz[b], vcls[b] = B.vcls[b], vpool[b] = B.vpool[b];
             continue;
@@ -2087,6 +2102,12 @@ static void bind_vertex_buffers(VkExec *ex) {
     }
     memcpy(B.vcls, vcls, sizeof vcls), memcpy(B.vpool, vpool, sizeof vpool);
     memcpy(B.vin, ex->vbuf, sizeof B.vin);
+#ifdef __APPLE__
+    for (int b = 0; b < 16; b++) {   // a copy sits in B.vb: the next draw's shortcut must not take it for the stream's own
+        VkValign va;
+        if (vk_valign_layout(ex->pipe.vattr, b, ex->pipe.vstream[b].stride, &va)) B.vin[b].address = 0, B.vin[b].size = UINT32_MAX;
+    }
+#endif
     B.vgen = gen, B.vres = res;
     if (B.vb_valid && !memcmp(B.vb, vb, sizeof vb) && !memcmp(B.vo, vo, sizeof vo) && !memcmp(B.vsz, vsz, sizeof vsz) &&
         (dyn || !memcmp(B.vstr, vstr, sizeof vstr)))
