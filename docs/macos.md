@@ -226,6 +226,33 @@ In the order they are likely to matter:
 5. The visible risks in the table above.
 6. Write fault cost, above.
 
+## Game files
+
+Results from a real game card dump, read on this machine without changing it. No game data or card identifiers are here.
+
+A MIG Flash backup is a folder named `<id>.xci`, holding `ROM.xci` and four small card files (card ID set, card UID,
+certificate, initial data). The tools want `ROM.xci` itself: give that file as `base`, not the folder. The small files
+are unique to the card, the build needs none of them, and they should not be copied or shared.
+
+| Check | Result |
+|---|---|
+| `ROM.xci` size against `card_image_size` of `expected-v1.0.0.json` | equal: 17,536,620,544 bytes, an untrimmed dump |
+| HFS0 hash chain from the card header (no keys needed) | root and all four partitions verify |
+| Program NCA `9d827368992a2faafa9062aa5458b7ec.nca` in the secure partition | present |
+| SHA-256 of the whole NCA against its name | matches, 17.1 GB in 211 s over SMB |
+| `extract_exefs.py` with `prod.keys`, then ExeFS hashes | `main`, `sdk`, `subsdk0`, `rtld` and `main.npdm` all match |
+
+The RomFS was not hashed against `romfs.sha256`. The NCA hash already covers those bytes.
+
+`extract_exefs.py` runs on macOS with Python 3.15 and `cryptography` 50.0.2, which is the first of the Windows-side tools
+to run here. Its hash check is the quickest full test of a dump and keys together: it reads little of the card.
+
+The base alone does not build. Only 1.1.1, 1.2.1 and 1.4.3 have patch sets (`recomp/patches-*.txt`), so a cumulative
+update NSP is needed as well, and an update on a game card does not count: the `update` partition of a card holds system
+firmware. The keys file must also reach the update's key generation. 1.0.0 and 1.2.1 share their SDK, so keys that open
+the base should open 1.2.1; 1.4.3 uses a much newer SDK (20.5.22) and will need newer master keys. Keys that stop at
+`master_key_0f` (firmware 16) are probably too old for it, which only the extraction can prove.
+
 ## Status
 
 The runtime builds, links and runs on this machine; game code has never run here. There is no game on the machine, so
@@ -255,6 +282,6 @@ executable among them, have not run yet.
 | 4. Boot | title screen | needs game files |
 | 5. Play | a stable 60 fps in the open world | needs game files |
 
-No game files, keys or `config.local.toml` are on this machine yet (Spotlight found none; external volumes may not be
-indexed). Phases 3 to 5 wait for them. Before boot, these are known work: draw triangle fans as lists, and check
+The base game dump and keys are verified ([Game files](#game-files)), but no update is on hand. Phases 3 to 5 wait for a
+1.2.1 or 1.4.3 update NSP. Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
