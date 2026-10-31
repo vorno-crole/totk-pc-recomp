@@ -582,6 +582,9 @@ static void rs_forget(VkExec *ex) {   // the pipeline infos the lists are keyed 
 void vk_exec_draw_shutdown(void) {
     if (!Z.ready) return;
     VkCtx *c = vk_ctx();
+#ifdef __APPLE__
+    vk_valign_shutdown();
+#endif
     twins_release(c);
     for (int i = 0; i < DV_COUNT; i++) {
         if (Z.img[i].sview != Z.img[i].view) vkDestroyImageView(c->device, Z.img[i].sview, NULL);
@@ -2320,6 +2323,23 @@ static int vb_used_on(void) {
     return on;
 }
 
+#ifdef __APPLE__
+// A stream whose layout Metal cannot read (vk_valign.c) binds an aligned copy of its range, with the copy's stride.
+// 1 when the stream needs one (nb is the zero buffer when its range does not resolve); 0 leaves the outputs alone.
+static int valign_bind(const VkExec *ex, int b, const NVNbufferRange *r, VkBuffer *nb, VkDeviceSize *nsz,
+                       VkDeviceSize *nstr) {
+    VkValign va;
+    if (b >= 16 || !vk_valign_layout(ex->pipe.vattr, b, (uint32_t)*nstr, &va)) return 0;
+    *nstr = va.stride;
+    VkMemSpan sp;
+    if (r->address && vk_mem_resolve(r->address, 1, &sp)) {
+        uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
+        if (!vk_valign_buffer(r->address, n, &va, nb, nsz)) *nb = Z.zbuf, *nsz = ZERO_BYTES;
+    }
+    return 1;
+}
+#endif
+
 static void bind_vertex_buffers(VkExec *ex) {
     VkExecDraw *D = ex->draw;
     int dyn = vk_pipeline_vertex_input_dynamic();
@@ -2351,7 +2371,13 @@ static void bind_vertex_buffers(VkExec *ex) {
         void *npool = NULL;
         if (b != VK_PIPE_ZERO_BINDING) {
             const NVNbufferRange *r = &ex->vbuf[b];
-            if ((D->B.vres >> b & 1) && D->B.vin[b].address == r->address && D->B.vin[b].size == r->size) {
+            int copied = 0;
+#ifdef __APPLE__
+            copied = valign_bind(ex, b, r, &nb, &nsz, &nstr);
+#endif
+            if (copied) {   // another stream's copy: the next draw must not take it for the stream's own
+                D->B.vres &= ~(1u << b);
+            } else if ((D->B.vres >> b & 1) && D->B.vin[b].address == r->address && D->B.vin[b].size == r->size) {
                 nb = D->B.vb[b], no = D->B.vo[b], nsz = D->B.vsz[b], ncls = D->B.vcls[b], npool = D->B.vpool[b];
             } else {
                 VkMemSpan sp;
