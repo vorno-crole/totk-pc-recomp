@@ -43,7 +43,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `shaderInt64`, `shaderStorageImageWriteWithoutFormat`, BC textures, anisotropy, independent blend | yes | |
 | `geometryShader` | **no** | required by `vk_device.c` `create_device`, but no stage uses it: pipelines are vertex and fragment only, so the check is dropped on macOS |
 | `shaderFloat64` | no | existing softfloat64 path (`vk_caps.c`) |
-| ASTC | no | existing compute decoder (`vk_astc.c`), as on Windows on this GPU family |
+| ASTC | no | the compute decoder does not compile here, see [ASTC](#the-astc-compute-decoder-does-not-compile), so the CPU decoder runs |
 | Graphics pipeline library | no | existing whole-pipeline path, the default on AMD RDNA 1/2 on Windows |
 | Subgroup size 32 | yes, fixed at 32 | the pin works |
 | `minStorageBufferOffsetAlignment` 4 | 16 | existing rounding path (`vk_caps.c`) |
@@ -118,6 +118,43 @@ written, so the cost on this machine depends on how many pages are written per f
 from a real run. If it is high, the answer is to leave pages written in recent frames unprotected and count them as
 written every time, since a page copy is far cheaper than a fault.
 
+A commit leaves watched pages read-only, so the first write of every page costs one of these faults on top of its zero
+fill. The whole 3.4 GiB application pool would be about 5 s of CPU spread over its loading threads, if every page were
+written. A first version left committed pages writable and marked them written, which saved those faults, but it
+reported pages nobody wrote and `--probe-gfx-abi` rightly failed it.
+
+### The ASTC compute decoder does not compile
+
+`vkCreateComputePipelines` fails for `astc_decode.comp`: `Compiler encountered an internal error`. It is the compiler for
+AMD GPUs, reproduced outside the game with `newLibraryWithSource` and `newComputePipelineStateWithFunction` on the MSL
+that `MVK_CONFIG_DEBUG=1` printed. What did not help:
+
+| Change | Result |
+|---|---|
+| Fast math on or off | fails after 0.3 to 0.8 s off, about 30 s on |
+| `MTLLibraryOptimizationLevelSize` | fails after about 30 s |
+| Workgroup arrays made thread-local | fails, so workgroup memory is not the trigger |
+| Group barriers removed | fails after 140 s |
+
+The MSL has no `coherent`, so this is not Dragon's Crown's bug. The size of the shader (2,361 lines of MSL, everything
+inlined) and the long failures suggest a limit in the compiler rather than one bad construct, but that is not proven.
+The runtime falls back by itself to the CPU decoder, which is correct and tested (`--probe-vkmem`, 186,758 blocks) but
+slow for a game with this many ASTC textures. `--probe-astc` fails here for this reason. The next things to try are
+splitting the shader into smaller functions Metal does not inline, or transcoding ASTC to BC at install time.
+
+### Thread interruption
+
+A port of Linux's signal handshake stopped only 551 of 2,000 tries inside its 200 us window, and would have left
+asynchronous preemption nearly idle. `thread_suspend` with `thread_get_state` and `thread_set_state` stopped 2,000 of
+2,000 and redirected 200 of 200.
+
+### Stress test
+
+`tests/plat_stress_macos.c` runs the platform file without game files. Three runs passed: 1,200,000 contended lock
+increments with readers alongside, a timed wait of 20.03 ms for 20 ms, 1,000 fiber switches, and the interruption numbers
+above. In its write-watch part three threads write random pages while the main thread syncs a copy every 2 ms: about
+500,000 pages over 800 rounds in 3 s, and 0 words differ at the end.
+
 ### Address space
 
 These all reserve at the fixed addresses in a process linked as a normal PIE: 8 GiB at `0x7000000000`, 6 GiB at
@@ -140,8 +177,8 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Override tables | `__start_`/`__stop_` symbols | `section$start$__DATA$totk_ovr` symbols |
 | Assembly stubs | `.type`, `.size` | no such directives; C symbols take a leading underscore |
 | Locks | futex | `os_sync_wait_on_address` (public since macOS 14.4) on the same 32-bit words, so the lock logic is unchanged |
-| Faults | `SIGSEGV`, `gregs[REG_RIP]` | `SIGBUS` as well, `uc_mcontext->__ss.__rip` |
-| Interrupting a thread | `SIGRTMIN + 4` | `SIGUSR2`, same handshake |
+| Faults | `SIGSEGV`, `gregs[REG_RIP]` | `SIGBUS` as well, `uc_mcontext->__ss.__rip`. A watched reservation installs the handler itself |
+| Interrupting a thread | signal handshake | `thread_suspend`, `thread_get_state`, `thread_set_state`, as on Windows. A signal handshake stopped only 551 of 2,000 tries inside its 200 us window here |
 | Write watch | userfaultfd | page bitmap, `mprotect`, fault handler |
 | Reserving | `MAP_FIXED_NOREPLACE` | `mach_vm_allocate` with `VM_FLAGS_FIXED`, which fails on taken addresses |
 | Reading memory safely | `process_vm_readv` | `mach_vm_read_overwrite` |
@@ -151,6 +188,9 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Unbuffered reads | `O_DIRECT` | `fcntl(F_NOCACHE)` |
 | Window | a thread of its own | AppKit needs the main thread: the main thread runs the window and the game runs on another |
 | Vulkan | system driver | MoltenVK beside the executable, `VK_DRIVER_FILES`, `VK_KHR_portability_enumeration`, `VK_KHR_portability_subset` |
+| Memory mode | shadow copies | imports, as on Windows (`vk_memory.c`); mirror on, since the GPU is discrete |
+
+`runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
 
 A kernel write into a page the tracker holds read-only fails with `EFAULT` instead of faulting. `plat_file_pread` therefore
 touches the buffer's pages first, so each one is marked written and made writable before the read.
@@ -177,24 +217,44 @@ These cost days there. Check them here before looking elsewhere:
 
 In the order they are likely to matter:
 
-1. Frame rate through MoltenVK. Nothing has been measured with this game's draw counts.
-2. Shader compile time. MoltenVK converts SPIR-V to MSL and Metal compiles it, there is no graphics pipeline library, and
+1. ASTC on the CPU, above. It may be the first thing that limits play.
+2. Frame rate through MoltenVK. Nothing has been measured with this game's draw counts.
+3. Shader compile time. MoltenVK converts SPIR-V to MSL and Metal compiles it, there is no graphics pipeline library, and
    the extended-dynamic-state gaps add pipeline variants. The list holds 29,587 variants for 1.4.3.
-3. Shaders SPIRV-Cross or Metal refuses. Every shader can be tested offline: run the census output through the
-   conversion and a Metal compile before booting the game.
-4. The visible risks in the table above.
-5. Write fault cost, above.
+4. Shaders SPIRV-Cross or Metal refuses, like the ASTC decoder. Every shader can be tested offline: run the census
+   output through the conversion and a Metal compile before booting the game.
+5. The visible risks in the table above.
+6. Write fault cost, above.
 
 ## Status
+
+The runtime builds, links and runs on this machine; game code has never run here. There is no game on the machine, so
+`build_game.py` went as far as `--make-runtime-lib`, and the executable below was linked by hand against stub module
+glue in a scratch folder, not by `build_game.py`. The steps that link a real game on macOS, MoltenVK's copy beside the
+executable among them, have not run yet.
+
+| Check | Result |
+|---|---|
+| `tools/build_game.py --make-runtime-lib` | passes |
+| Hand link with lld, stub layout | passes |
+| `tests/plat_stress_macos.c` | passes |
+| `--probe-cfg`, `--probe-gfx-abi` (55 checks, write watch included), `--probe-vkdevice`, `--probe-nvn-tex` | pass |
+| `--probe-vkmem` (41 GPU checks through imports, 0 validation errors) | passes |
+| `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |
+| `--probe-astc` | fails: the compiler bug above |
+| `--selftest`, `--probe-kernel`, `--probe-ipc`, `--probe-services` | need lifted modules and ExeFS hashes, not run |
+| `--probe-vkexec` | needs the shader census, not run |
+| Windows and Linux builds | not rebuilt: there is no such machine here. The shared edits are behind `__APPLE__` or expand to the same text, but they need a build on each |
 
 | Phase | Done when | State |
 |---|---|---|
 | 0. Assessment | requirements checked against this GPU, memory and fault costs measured | done |
-| 1. Runtime builds | `totk --selftest` and the probes run without game files | in progress |
-| 2. Tools | `tools/extract.py`, hactool, translator on macOS | not started |
+| 1. Runtime builds | the runtime links and the game-free probes run | done, apart from the two open probes |
+| 2. Tools | `tools/extract.py`, hactool, translator on macOS | `build_xlate.py` names `osx-x64`; none of it has run, `dotnet` and `uv` are not installed |
 | 3. Shader census | every variant converts and compiles for Metal | needs game files |
 | 4. Boot | title screen | needs game files |
 | 5. Play | a stable 60 fps in the open world | needs game files |
 
 No game files, keys or `config.local.toml` are on this machine yet (Spotlight found none; external volumes may not be
-indexed). Phases 3 to 5 wait for them.
+indexed). Phases 3 to 5 wait for them. Before boot, these are known work: draw triangle fans as lists, and check
+`spirv_fixup` for `Coherent`.
