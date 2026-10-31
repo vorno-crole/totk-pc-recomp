@@ -1043,6 +1043,23 @@ static int64_t bindings_sort(Bindings *B, uint64_t *h) {
     return total;
 }
 
+#ifdef __APPLE__
+// Metal binds 16 samplers a stage directly, which is how MoltenVK binds a push descriptor set, and a shader above that
+// does not compile. A plain set goes into a Metal argument buffer, which has no such limit. Without this, the lighting
+// pass's shader for one material fails and the screen tiles holding that material stay black (docs/macos.md).
+static int over_metal_samplers(const Bindings *B) {
+    uint32_t vs = 0, fs = 0, cs = 0;
+    for (uint32_t i = 0; i < B->n; i++) {
+        const VkDescriptorSetLayoutBinding *d = &B->b[i];
+        if (d->descriptorType != VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER) continue;
+        if (d->stageFlags & VK_SHADER_STAGE_VERTEX_BIT) vs += d->descriptorCount;
+        if (d->stageFlags & VK_SHADER_STAGE_FRAGMENT_BIT) fs += d->descriptorCount;
+        if (d->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) cs += d->descriptorCount;
+    }
+    return vs > 16 || fs > 16 || cs > 16;
+}
+#endif
+
 static Layout *layout_get(Bindings *B) {
     uint64_t h = FNV0;
     int64_t total = bindings_sort(B, &h);
@@ -1055,6 +1072,9 @@ static Layout *layout_get(Bindings *B) {
     l->hash = h, l->n = B->n;
     memcpy(l->b, B->b, B->n * sizeof *B->b);
     l->push = total <= (int64_t)P.max_push;
+#ifdef __APPLE__
+    if (over_metal_samplers(B)) l->push = 0;
+#endif
     VkDescriptorSetLayoutCreateInfo si = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
                                           .flags = l->push ? VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR : 0,
                                           .bindingCount = l->n, .pBindings = l->b};

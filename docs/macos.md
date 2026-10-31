@@ -63,7 +63,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `minVertexInputBindingStrideAlignment` (portability) | 4 | `vk_valign.c` copies streams that break it, see [Vertex streams](#vertex-streams) |
 | `triangleFans` (portability) | true but slow | MoltenVK emulates fans with compute passes, see below |
 | `maxMemoryAllocationSize`, `maxBufferSize` | 3.5 GiB | one pool or buffer above it fails |
-| Samplers per stage, direct binding | 16 | two pipelines exceed it, see [First boot](#first-boot) |
+| Samplers per stage, direct binding | 16 | layouts above it are plain sets, see [Sampler limit](#sampler-limit) |
 | `maxPerStageDescriptorUniformBuffers`, `StorageBuffers` | 31 | Metal's 31 buffer slots per stage are shared with vertex buffers |
 | `maxSamplerAllocationCount` | 2048 | |
 
@@ -296,21 +296,34 @@ changed nothing, and the texture data was correct throughout.
 The title is still darker and less orange than the reference, which may be the camera's position or the failed 3D images
 below.
 
+### Sampler limit
+
+Play starts: Continue loads, and the opening cave runs. It showed black blocks around Link and Zelda, made of 32-pixel screen tiles.
+The game lights its picture at half resolution through a tile mask, with one pipeline per material class. The class for
+characters needs more than 16 samplers, Metal's limit for direct binding, which is how MoltenVK binds a push descriptor set.
+That pipeline did not compile, draws with it were skipped, and those tiles stayed black.
+
+`vk_pipeline.c` `layout_get` now makes such a layout a plain descriptor set, which MoltenVK puts in an argument buffer. Only
+pipelines over the limit change. Finding the pass took one script: the block's position is known, so measure the brightness step
+along its edge in every dumped image, and the first pass with a step is the one to read.
+
+To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A 10`. For a save, presses at ticks 900, 1300,
+1700 and 2100 get through Continue and the load prompt, and the world is on screen by frame 5000.
+
 ### What else the first runs showed
+
 
 
 - **3D render targets fail.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) fail with `MTLHeap must be enabled
   to create 2D-on-3D or block texel view compatible images`, retried every frame. `MVK_CONFIG_USE_MTLHEAP=1` did not help on
   Homebrew's build or the Khronos build. These include the grading LUT of the menu's background blur. The checkout of
   MoltenVK's newer sources no longer has this message and defaults heaps on, so building it is an option.
-- **More than 16 samplers.** Two pipelines fail with `'sampler' attribute parameter is out of bounds: must be between 0
-  and 15`. Metal allows 16 sampler bindings a stage outside argument buffers, and push descriptors bind directly here.
 - **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
   affects every frame's pacing, and is the first thing to look at for the frame rate.
 
 ## Status
 
-The game builds and reaches its title screen on this machine ([First boot](#first-boot)). Play has not been tried.
+The game builds and plays on this machine: title screen, saves, and the opening cave ([First boot](#first-boot)). Beyond the cave is untested.
 
 | Check | Result |
 |---|---|
@@ -332,7 +345,7 @@ The game builds and reaches its title screen on this machine ([First boot](#firs
 | 2. Tools | `tools/extract.py`, hactool, translator on macOS | done |
 | 3. Shader census | every variant converts and compiles for Metal | not started |
 | 4. Boot | title screen | done |
-| 5. Play | a stable 60 fps in the open world | not started |
+| 5. Play | a stable 60 fps in the open world | started: the opening cave runs |
 
 The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
