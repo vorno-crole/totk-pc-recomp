@@ -2,6 +2,11 @@
 
 **TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native x86-64 application for Windows and Linux ([docs/architecture.md](docs/architecture.md)).
 
+> [!NOTE]
+> **This is a fork that adds an Intel Mac port** to [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp). The work is on the branch [`macos-intel`](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel). On the one Mac it has been tried on, the game reaches its title screen and plays its opening cave at about 60 fps; nothing past the cave has been tested. There is no installer and no packaged app: you build it from source with your own game files. [macOS status](#macos-intel) has the details.
+>
+> Report Mac problems to this fork, not upstream. The Windows and Linux sections below describe upstream's work; those builds have not been rerun with this branch's changes.
+
 > [!IMPORTANT]
 > **No game files are included.** You need your own legally obtained copy of *Tears of the Kingdom*, dumped from your own console: the base game and the 1.1.0, 1.2.1 or 1.4.3 update. Instructions for obtaining those files will not be provided.
 >
@@ -12,6 +17,19 @@
 Early development. The game is playable on Windows and Linux; visual bugs and crashes are still expected.
 
 Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
+
+### macOS (Intel)
+
+Experimental, and tested on one machine: an i7-9700K with an AMD Radeon RX 6600 XT, 32 GB of RAM and macOS 15.4, through MoltenVK 1.4.2.
+
+| | |
+|---|---|
+| Works | build from source, title screen at 60 fps, loading a save, the opening cave at about 60 fps |
+| Known problems | 3D render targets fail, so some effects may be wrong; ASTC textures decode on the CPU, because Metal's compiler for AMD GPUs fails on the GPU decoder; timed waits run slow, which may affect pacing; no custom border colours, LOD bias or last-vertex flat shading in Metal |
+| Not tested | anything past the opening cave, long sessions, other Macs and GPUs, preparing shaders ahead of play (expect stutter while shaders compile) |
+| Not available | Apple silicon, an installer, an `.app` |
+
+The findings, measurements and work left are in [docs/macos.md](docs/macos.md).
 
 ## Features
 
@@ -41,6 +59,7 @@ Report problems as issues, following [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Planned
 
+- macOS: a stable full playthrough, then an `.app`
 - VRR
 
 ## Installing
@@ -67,6 +86,14 @@ Requirements: as on Windows, plus Linux 6.7 or later and glibc 2.34 or later (Ub
 
 To update, run a newer setup on the same folder; saves and settings are kept. Settings are in the in-game menu and in `totk.ini` ([totk.ini.example](totk.ini.example) lists every key). Controls: [docs/controls.md](docs/controls.md).
 
+The installer and the releases are for Windows and Linux only.
+
+### macOS (Intel)
+
+Requirements: an Intel Mac with AVX2, macOS 14.4 or later, Homebrew, a Metal 3 GPU (only an RX 6600 XT has been tried), about 60 GB free on a local disk, your base game and a 1.2.1 or 1.4.3 update (1.4.3 was the one tested), and keys new enough for that update.
+
+Check out the `macos-intel` branch and follow [docs/building.md](docs/building.md#macos-in-progress). A full build takes about ten minutes on 8 cores. The result is `build/v143/totk`, for your own use.
+
 ## Credits
 
 TotK Recomp builds on the projects below. What was taken from each, with its license, is listed in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
@@ -89,6 +116,6 @@ TotK Recomp is an independent, non-commercial fan project, not affiliated with o
 
 ## Building from source
 
-[docs/building.md](docs/building.md) lists the toolchain and the steps; the Intel Mac port is in [docs/macos.md](docs/macos.md). Everything the build writes stays under `build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit. Testers: [docs/tester-guide.md](docs/tester-guide.md).
+[docs/building.md](docs/building.md) lists the toolchain and the steps, for macOS too; the Intel Mac port is in [docs/macos.md](docs/macos.md). Everything the build writes stays under `build\` and `generated\`, which git ignores; run `tools/check_content.py` before a commit. Testers: [docs/tester-guide.md](docs/tester-guide.md).
 
 Most of the code and documentation is written by AI coding agents (Claude Code) under the maintainer's direction; the maintainer plays every build and decides what is merged. [AGENTS.md](AGENTS.md) holds the rules they work under.
