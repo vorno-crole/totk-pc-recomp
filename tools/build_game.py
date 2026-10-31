@@ -985,6 +985,7 @@ def main():
         # vk_device.c moltenvk_beside_exe points the Vulkan loader at this ICD. 1.4.2 or newer: Homebrew's Intel bottle is
         # 1.2.11, Vulkan 1.2, and refuses imported host memory.
         moltenvk = Path(os.environ.get('TOTK_MOLTENVK', '/usr/local/opt/molten-vk/lib/libMoltenVK.dylib'))
+        (exe.parent / moltenvk.name).unlink(missing_ok=True)   # Homebrew's is read-only, so the copy is too
         shutil.copy2(moltenvk, exe.parent / moltenvk.name)
         (exe.parent / 'MoltenVK_icd.json').write_text(json.dumps({'file_format_version': '1.0.0', 'ICD': {
             'library_path': f'./{moltenvk.name}', 'api_version': '1.4.0', 'is_portability_driver': True}}, indent=4) + '\n')

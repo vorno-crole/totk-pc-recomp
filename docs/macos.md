@@ -59,9 +59,10 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `VK_EXT_robustness2` | extension listed, all three features false | `nullDescriptor` is not used by the runtime |
 | `VK_EXT_conditional_rendering`, `VK_EXT_transform_feedback` | no | only buffer usage flags depend on them |
 | `VK_EXT_device_fault`, `VK_AMD_buffer_marker` | no | a lost device gives no report |
-| `imageView2DOn3DImage` (portability) | no | check `vk_texture.c` views of 3D images |
+| `imageView2DOn3DImage` (portability) | no | 3D render targets fail, see [First boot](#first-boot) |
 | `triangleFans` (portability) | true but slow | MoltenVK emulates fans with compute passes, see below |
 | `maxMemoryAllocationSize`, `maxBufferSize` | 3.5 GiB | one pool or buffer above it fails |
+| Samplers per stage, direct binding | 16 | two pipelines exceed it, see [First boot](#first-boot) |
 | `maxPerStageDescriptorUniformBuffers`, `StorageBuffers` | 31 | Metal's 31 buffer slots per stage are shared with vertex buffers |
 | `maxSamplerAllocationCount` | 2048 | |
 
@@ -256,37 +257,61 @@ its `header_key` and `master_key_00` to `0f` equal the older set's, and it decry
 `sdk`, `subsdk0`, `rtld` and `main.npdm` all match `expected-v1.4.3.json`.
 
 A 1.4.3 update NSP checked out: version 720896, the file table complete, every NCA's SHA-256 matching its name, and a
-common ticket. Its RomFS has not been merged with the base yet, so the `romfs` hash of `expected-v1.4.3.json` is untested.
+common ticket. Its RomFS merged with the base to the `romfs` hash of `expected-v1.4.3.json`.
+
+## First boot
+
+The full pipeline ran on this machine with 1.4.3, nothing on another OS:
+
+| Step | Result |
+|---|---|
+| `tools/build_hactool.py`, `tools/build_xlate.py`, `tools/xlate_smoke.py` | pass with no macOS changes beyond the `osx-x64` name; translator built in 36 s |
+| `tools/extract.py` | ExeFS and RomFS of 1.0.0 and the merged 1.4.3 match every recorded hash; 304,243 files |
+| `recomp/gen.py` | 283,000 functions, 0 unsupported instructions, 78 s |
+| `tools/build_game.py` | compile 538 s on 8 cores, link 1.6 s, 237 MiB executable |
+
+The game reaches the title screen and animates it. On the title, about 44 fps, GPU 10 to 18 ms a frame. The write watch cost
+0.5 ms a frame there (394 pages found): far from the worry above, but a menu writes little, so measure it in the world.
+
+`--seconds S` counts world time from the save's first frame, so at the title it never ends, and `--shot` never fires. Use
+`TOTK_SHOTS=300-3300:600 TOTK_SHOTS_DIR=<dir> TOTK_SHOTS_FULL=1`.
+
+Problems the first runs showed:
+
+- **3D render targets fail.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) fail with `MTLHeap must be enabled
+  to create 2D-on-3D or block texel view compatible images`, retried every frame. `MVK_CONFIG_USE_MTLHEAP=1` did not help on
+  Homebrew's build or the Khronos build. These include the grading LUT of the menu's background blur. The checkout of
+  MoltenVK's newer sources no longer has this message and defaults heaps on, so building it is an option.
+- **More than 16 samplers.** Two pipelines fail with `'sampler' attribute parameter is out of bounds: must be between 0
+  and 15`. Metal allows 16 sampler bindings a stage outside argument buffers, and push descriptors bind directly here.
+- **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
+  affects every frame's pacing, and is the first thing to look at for the frame rate.
 
 ## Status
 
-The runtime builds, links and runs on this machine; game code has never run here. There is no game on the machine, so
-`build_game.py` went as far as `--make-runtime-lib`, and the executable below was linked by hand against stub module
-glue in a scratch folder, not by `build_game.py`. The steps that link a real game on macOS, MoltenVK's copy beside the
-executable among them, have not run yet.
+The game builds and reaches its title screen on this machine ([First boot](#first-boot)). Play has not been tried.
 
 | Check | Result |
 |---|---|
-| `tools/build_game.py --make-runtime-lib` | passes |
-| Hand link with lld, stub layout | passes |
+| `tools/build_game.py --version v143` | passes |
 | `tests/plat_stress_macos.c` | passes |
+| `--selftest`, `--probe-loader`, `--probe-kernel`, `--probe-fs`, `--probe-services`, `--probe-nvn`, `--probe-movie` | pass |
 | `--probe-cfg`, `--probe-gfx-abi` (55 checks, write watch included), `--probe-vkdevice`, `--probe-nvn-tex` | pass |
 | `--probe-vkmem` (41 GPU checks through imports, 0 validation errors) | passes |
 | `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |
 | `--probe-astc` | fails: the compiler bug above |
-| `--selftest`, `--probe-kernel`, `--probe-ipc`, `--probe-services` | need lifted modules and ExeFS hashes, not run |
-| `--probe-vkexec` | needs the shader census, not run |
+| `--probe-ipc` | fails on the timing above; the third failure line is a deliberate fatal check |
+| `--probe-vkexec`, `--probe-shader` | need the shader census, not run |
 | Windows and Linux builds | not rebuilt: there is no such machine here. The shared edits are behind `__APPLE__` or expand to the same text, but they need a build on each |
 
 | Phase | Done when | State |
 |---|---|---|
 | 0. Assessment | requirements checked against this GPU, memory and fault costs measured | done |
 | 1. Runtime builds | the runtime links and the game-free probes run | done, apart from the two open probes |
-| 2. Tools | `tools/extract.py`, hactool, translator on macOS | `build_xlate.py` names `osx-x64`; none of it has run, `dotnet` and `uv` are not installed |
-| 3. Shader census | every variant converts and compiles for Metal | needs game files |
-| 4. Boot | title screen | needs game files |
-| 5. Play | a stable 60 fps in the open world | needs game files |
+| 2. Tools | `tools/extract.py`, hactool, translator on macOS | done |
+| 3. Shader census | every variant converts and compiles for Metal | not started |
+| 4. Boot | title screen | done |
+| 5. Play | a stable 60 fps in the open world | not started |
 
-The base game, a 1.4.3 update and keys are verified ([Game files](#game-files)), apart from the merged RomFS. Phases 3 to
-5 can start once the tools of phase 2 run. Before boot, these are known work: draw triangle fans as lists, and check
+The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
