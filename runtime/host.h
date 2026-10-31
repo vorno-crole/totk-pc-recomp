@@ -101,9 +101,11 @@ typedef struct { const char *name; GuestFn fn; } RtHostEntry;
 // File-scope declarations; fn must be declared before. The loader binds them by symbol name. The entries of every
 // object file meet in one section per kind, which hostfn.c walks: on PE/COFF ".ovr$m", which the linker sorts between
 // hostfn.c's ".ovr$a" and ".ovr$z" markers; on ELF "totk_ovr", which the linker brackets with __start_totk_ovr and
-// __stop_totk_ovr.
+// __stop_totk_ovr; on Mach-O "__DATA,totk_ovr", which it brackets with section$start and section$end symbols.
 #ifdef _WIN32
 #define RT_HOST_SECTION(kind) section("." #kind "$m")
+#elif defined(__APPLE__)
+#define RT_HOST_SECTION(kind) section("__DATA,totk_" #kind)
 #else
 #define RT_HOST_SECTION(kind) section("totk_" #kind)
 #endif

@@ -219,10 +219,26 @@ static void window_main(void *arg) {
     }
 }
 
+#ifdef __APPLE__
+// AppKit runs only on the process's first thread, so main() (main.c) gives that thread to this function and starts the
+// game on another. It waits until the game first needs video and runs the window loop then.
+static PlatEvent g_video_wanted;
+
+void gfx_window_main_thread(void) {
+    plat_event_wait(&g_video_wanted);
+    window_main(NULL);
+    for (;;) plat_sleep_ms(1000);   // no video: the game goes on without a window and ends the process itself
+}
+#endif
+
 static void video_start(void *arg) {
     (void)arg;
     plat_event_init(&g_video_ready, 1, 0);
+#ifdef __APPLE__
+    plat_event_set(&g_video_wanted);
+#else
     if (!plat_thread_spawn(window_main, NULL, "window", 0)) rt_fatal("gfx: cannot start the window thread");
+#endif
     plat_event_wait(&g_video_ready);
 }
 

@@ -554,14 +554,24 @@ __asm__(".text\n"
         "    jmpq *-8(%rsp)\n"
         ".seh_endproc\n");
 #else
+// Mach-O has no .type or .size, and C symbols carry a leading underscore.
+#ifdef __APPLE__
+#define KERN_ASM_SYM(s) "_" #s
+#define KERN_ASM_TYPE(s) ""
+#define KERN_ASM_SIZE(s) ""
+#else
+#define KERN_ASM_SYM(s) #s
+#define KERN_ASM_TYPE(s) ".type " #s ", @function\n"
+#define KERN_ASM_SIZE(s) ".size " #s ", .-" #s "\n"
+#endif
 // The System V version: rsi and rdi are volatile there too, and the interrupted code may keep data in the 128 bytes
 // below its stack pointer (the red zone), so the return slot and the saves go below that. Without a red zone in the
 // way the slot is at entry - 136; the exit restores rsp to the entry value and jumps through the slot.
 __asm__(".text\n"
-        ".globl kern_ap_stub\n"
-        ".type kern_ap_stub, @function\n"
+        ".globl " KERN_ASM_SYM(kern_ap_stub) "\n"
+        KERN_ASM_TYPE(kern_ap_stub)
         ".p2align 4\n"
-        "kern_ap_stub:\n"
+        KERN_ASM_SYM(kern_ap_stub) ":\n"
         "    .cfi_startproc\n"
         "    leaq -136(%rsp), %rsp\n"   // not sub: the flags are still the interrupted code's until pushfq
         "    pushfq\n"
@@ -599,9 +609,9 @@ __asm__(".text\n"
         "    ldmxcsr 36(%rsp)\n"
         "    cld\n"
         AP_VZEROUPPER
-        "    call kern_ap_rip\n"
+        "    call " KERN_ASM_SYM(kern_ap_rip) "\n"
         "    movq %rax, 88(%rbp)\n"   // the return slot: rbp + 10 pushes + pushfq
-        "    call kern_ap_yield\n"
+        "    call " KERN_ASM_SYM(kern_ap_yield) "\n"
         "    ldmxcsr 32(%rsp)\n"
         "    " AP_VMOV " 64(%rsp), " AP_V "0\n"
         "    " AP_VMOV " 96(%rsp), " AP_V "1\n"
@@ -634,7 +644,7 @@ __asm__(".text\n"
         "    leaq 136(%rsp), %rsp\n"
         "    jmpq *-136(%rsp)\n"
         "    .cfi_endproc\n"
-        ".size kern_ap_stub, .-kern_ap_stub\n");
+        KERN_ASM_SIZE(kern_ap_stub));
 #endif
 
 enum { AP_NONE, AP_RETRY, AP_SENT };
