@@ -206,6 +206,20 @@ well: the shadow copies are chosen for the measured cost above, not for a missin
 The Deck's GPU (Van Gogh) has no native ASTC, so its textures go through the compute decoder (`runtime/vk_astc.c`,
 `TOTK_ASTC`) as on desktop AMD GPUs without it; frame times measured there include it.
 
+## macOS (in progress)
+
+Intel Macs only, macOS 14.4 or later, Vulkan through MoltenVK 1.4.2 or newer. The findings, the state of the port and
+what has not run yet are in [macos.md](macos.md).
+
+```sh
+brew install llvm lld ninja sdl3 opus libvpx zstd vulkan-headers vulkan-loader molten-vk
+brew install uv && brew install --cask dotnet-sdk
+```
+
+Homebrew's Intel bottle of `molten-vk` may be 1.2.11, which is too old: `TOTK_MOLTENVK` names a newer `libMoltenVK.dylib`.
+The steps are the Linux ones. `build_game.py` takes Homebrew's clang from `/usr/local/opt/llvm/bin`, and copies MoltenVK
+and its ICD beside `totk`, which points the Vulkan loader there.
+
 ## Checks
 
 Before a commit:
