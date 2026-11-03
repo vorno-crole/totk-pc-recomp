@@ -213,6 +213,7 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Memory mode | shadow copies | imports, as on Windows (`vk_memory.c`); mirror on, since the GPU is discrete |
 | Thread-locals across fiber switches | the thread register gives each access the running thread's variable | the address comes from a call clang merges within a function, so a fiber resumed on another thread kept the first thread's; `PLAT_TLS_VAR` looks it up at each use |
 | Overlay GPU numbers | sysfs `gpu_busy_percent`, `mem_info_vram_used`; ADL for the rest | the `PerformanceStatistics` of the GPU's IOAccelerator: `Device Utilization %`, `inUseVidMemoryBytes`, `Temperature(C)`, `Total Power(W)`, `Core Clock(MHz)`. MoltenVK's `deviceLUID` is Metal's `registryID` big-endian, the accelerator's registry entry ID, which picks the GPU |
+| Local IPC (Discord) | Unix socket, `SOCK_CLOEXEC`, `MSG_NOSIGNAL` | the same socket in `$TMPDIR`, where Discord's macOS client listens; `FD_CLOEXEC` and `SO_NOSIGPIPE` instead of the two flags |
 | 3D render targets | 2D array views of the 3D image's depth planes (`2D_ARRAY_COMPATIBLE`) | MoltenVK makes such images only in Metal placement heaps, which it leaves off on AMD (`imageView2DOn3DImage` 0), so each drawn level gets a 2D array stand-in that every pass end copies back (`vk_exec.c` `vol_target`) |
 
 `runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
@@ -368,11 +369,19 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
 
 The game builds and plays on this machine: title screen, saves, and the opening cave ([First boot](#first-boot)). Beyond the cave is untested.
 
+On v0.3.7 the replay runs on its own thread by default. A scripted run on Great Sky Island with it on and off: 42.5 and
+41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either; the default stays. The new translator changes every
+shader key, so the first start after the update rebuilds all 2,668 pipelines before the window opens (132 s here); the
+next start took 1.5 s.
+
 | Check | Result |
 |---|---|
 | `tools/build_game.py --version v143` | passes |
-| `tests/plat_stress_macos.c` | passes |
-| `--selftest`, `--probe-loader`, `--probe-kernel`, `--probe-fs`, `--probe-services`, `--probe-nvn`, `--probe-movie` | pass |
+| `tests/plat_stress_macos.c`, `tests/intr_fault_macos.c` | pass |
+| `--selftest`, `--probe-loader`, `--probe-kernel`, `--probe-fs`, `--probe-nvn`, `--probe-movie` | pass |
+| `--probe-services` | 10 of 3,187 checks fail on v0.3.7: the 5.1 speaker texts (#438) have no Brazilian Portuguese or Chinese yet. Not a macOS difference |
+| `--probe-crash-call`, `--probe-crash-null` | pass: `libsystem_platform.dylib+0xe32` for the fault in `strlen`, `outside every module` for the null call |
+| `--probe-discord` | skips without a Discord client |
 | `--probe-cfg`, `--probe-gfx-abi` (55 checks, write watch included), `--probe-vkdevice`, `--probe-nvn-tex` | pass |
 | `--probe-vkmem` (41 GPU checks through imports, 0 validation errors) | passes |
 | `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |

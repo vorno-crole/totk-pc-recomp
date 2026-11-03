@@ -12,6 +12,7 @@
 #include <crt_externs.h>
 #include <os/clock.h>
 #include <os/os_sync_wait_on_address.h>
+#include <poll.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -22,8 +23,10 @@
 #include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -914,9 +917,18 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
         if (k > 0) write_all(2, line, (size_t)k < sizeof line ? (size_t)k : sizeof line - 1);
     }
     if (crash_fn && ours) {
+        // rip's module, as linux.c: NULL for this executable, its file name for a library (MoltenVK, a system
+        // framework), "" for no module (a jump to address 0)
+        int found = dladdr((void *)rip, &info) && info.dli_fname;
         PlatCrash c = {sig == SIGSEGV ? "access violation" : sig == SIGBUS ? "bus error"
                        : sig == SIGILL ? "illegal instruction" : "arithmetic exception",
-                       (uint32_t)sig, rip, rip - (uintptr_t)self.dli_fbase, -1, 0};
+                       (uint32_t)sig, rip, found ? rip - (uintptr_t)info.dli_fbase : rip, -1, 0};
+        if (!found) {
+            c.module = "";
+        } else if (info.dli_fbase != self.dli_fbase) {
+            const char *n = strrchr(info.dli_fname, '/');
+            c.module = n ? n + 1 : info.dli_fname;
+        }
         if (mem) c.access = (err & 16) ? 8 : (err & 2) ? 1 : 0, c.addr = at;
         crash_fn(&c);   // logs and exits
     }
@@ -1608,6 +1620,68 @@ long plat_child_read(PlatChild *c, void *buf, size_t cap) {
     do k = read(c->out, buf, cap);
     while (k < 0 && errno == EINTR);
     return (long)k;
+}
+
+// ---- local IPC (platform.h): Discord's Rich Presence Unix domain socket, as linux.c. macOS has neither SOCK_CLOEXEC
+// nor MSG_NOSIGNAL: the descriptor gets FD_CLOEXEC after socket(), and SO_NOSIGPIPE makes a closed peer an error
+// instead of a SIGPIPE. Discord's macOS client listens in $TMPDIR.
+struct PlatIpc { int fd; };
+
+PlatIpc *plat_ipc_connect(const char *name) {
+    const char *dirs[] = {getenv("DISCORD_IPC_PATH"), getenv("XDG_RUNTIME_DIR"), getenv("TMPDIR"), "/tmp"};
+    for (size_t d = 0; d < sizeof dirs / sizeof *dirs; d++) {
+        if (!dirs[d] || !*dirs[d]) continue;
+        char path[sizeof ((struct sockaddr_un *)0)->sun_path];
+        size_t len = strlen(dirs[d]);
+        while (len > 1 && dirs[d][len - 1] == '/') len--;   // $TMPDIR ends with a slash on macOS
+        if ((size_t)snprintf(path, sizeof path, "%.*s/%s", (int)len, dirs[d], name) >= sizeof path) continue;
+        int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return NULL;
+        int one = 1;
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+        setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+        struct sockaddr_un sa = {0};
+        sa.sun_family = AF_UNIX;
+        strcpy(sa.sun_path, path);
+        if (connect(fd, (struct sockaddr *)&sa, sizeof sa) == 0) {
+            PlatIpc *p = malloc(sizeof *p);
+            if (!p) {
+                close(fd);
+                return NULL;
+            }
+            p->fd = fd;
+            return p;
+        }
+        close(fd);   // nothing listens at this path: the next directory may have it
+    }
+    return NULL;
+}
+
+int plat_ipc_read(PlatIpc *p, void *buf, size_t n, uint32_t ms) {
+    struct pollfd pf = {.fd = p->fd, .events = POLLIN};
+    int r = poll(&pf, 1, (int)ms);
+    if (r <= 0) return r < 0 && errno != EINTR ? -1 : 0;
+    ssize_t got = recv(p->fd, buf, n, 0);
+    return got > 0 ? (int)got : -1;   // 0 bytes: the peer closed the socket
+}
+
+int plat_ipc_write(PlatIpc *p, const void *buf, size_t n) {
+    const uint8_t *at = buf;
+    while (n) {
+        ssize_t put = send(p->fd, at, n, 0);
+        if (put <= 0) {
+            if (put < 0 && errno == EINTR) continue;
+            return 0;
+        }
+        at += put, n -= put;
+    }
+    return 1;
+}
+
+void plat_ipc_close(PlatIpc *p) {
+    if (!p) return;
+    close(p->fd);
+    free(p);
 }
 
 // ---- restart
