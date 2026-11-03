@@ -1575,6 +1575,11 @@ void plat_gpu_load(PlatLoad *l, float *load_pct, float *vram_used_mb) {
     if (read_u64_file(path, &v)) *vram_used_mb = (float)(v >> 20);
 }
 
+void plat_gpu_sensors(PlatLoad *l, float *temp_c, float *power_w, float *clock_mhz) {
+    (void)l;
+    *temp_c = *power_w = *clock_mhz = -1;
+}
+
 void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {
     *used_mb = *total_mb = *proc_mb = -1;
     FILE *f = fopen("/proc/meminfo", "r");

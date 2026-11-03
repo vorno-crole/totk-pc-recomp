@@ -317,6 +317,7 @@ static void machine_clear(PerfStats *s) {
 static void machine_copy(PerfStats *d, const PerfStats *s) {
     memcpy(d->cpu_name, s->cpu_name, sizeof d->cpu_name);
     memcpy(d->gpu_name, s->gpu_name, sizeof d->gpu_name);
+    memcpy(d->os_name, s->os_name, sizeof d->os_name);
     d->cpu_total_pct = s->cpu_total_pct, d->cpu_game_pct = s->cpu_game_pct, d->cpu_temp_c = s->cpu_temp_c;
     d->ram_used_mb = s->ram_used_mb, d->ram_total_mb = s->ram_total_mb, d->ram_game_mb = s->ram_game_mb;
     d->gpu_pct = s->gpu_pct, d->gpu_temp_c = s->gpu_temp_c, d->gpu_power_w = s->gpu_power_w;
@@ -336,6 +337,7 @@ static void sampler(void *arg) {
     float vram_total = g_vram_total_mb;
     plat_mutex_unlock(&g_lock);
     sysinfo_cpu_name(s.cpu_name, sizeof s.cpu_name);
+    if (!plat_os_version(s.os_name, sizeof s.os_name)) s.os_name[0] = 0;
     if (!nv.tried) nvml_open(s.gpu_name);
     if (!nv.ok && !adl.tried) adl_open(s.gpu_name, bus);
     PlatLoad *l = plat_load_open(have_luid ? luid : NULL, bus);
@@ -346,6 +348,7 @@ static void sampler(void *arg) {
         plat_cpu_load(l, &s.cpu_total_pct, &s.cpu_game_pct, &s.cpu_temp_c);
         plat_mem_info(&s.ram_used_mb, &s.ram_total_mb, &s.ram_game_mb);
         plat_gpu_load(l, &s.gpu_pct, &s.vram_used_mb);
+        plat_gpu_sensors(l, &s.gpu_temp_c, &s.gpu_power_w, &s.gpu_clock_mhz);
         s.vram_total_mb = vram_total;
         nvml_sample(&s);
         adl_sample(&s);
