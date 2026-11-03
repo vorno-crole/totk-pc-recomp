@@ -334,6 +334,7 @@ static void crash_handler(const PlatCrash *x) {
     rt_log_raw("\n", 1);
     if (x->cxx_type)
         rt_logf("  C++ type %s%s%s\n", x->cxx_type, x->cxx_what ? ", what(): " : "", x->cxx_what ? x->cxx_what : "");
+    if (x->access >= 0) mem_describe_fault(x->addr);
     // A driver that runs out of memory faults or throws (std::bad_alloc) instead of returning an error: the commit
     // tells that apart from a driver bug, as rt_fatal's line does for our own failed allocations.
     double proc, used, limit;

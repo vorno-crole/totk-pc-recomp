@@ -200,10 +200,21 @@ static void commit(uint64_t a, uint64_t n, const char *what) {
         rt_fatal("memory: commit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
 
+// The last decommits, for a crash report on an address that one of them took away (mem_describe_fault). frz_lock.
+#define RECENT_N 64
+static struct { uint64_t a, n, ns; const char *what; uint32_t tid; } recent[RECENT_N];
+static uint32_t recent_next;
+
 static void decommit(uint64_t a, uint64_t n, const char *what) {
     plat_mutex_lock(&frz_lock);
     thaw_range_locked(a, n, 3);
     int ok = !n || plat_mem_decommit(a, n);
+    if (ok && n) {
+        recent[recent_next % RECENT_N].a = a, recent[recent_next % RECENT_N].n = n;
+        recent[recent_next % RECENT_N].ns = plat_now_ns(), recent[recent_next % RECENT_N].what = what;
+        recent[recent_next % RECENT_N].tid = plat_thread_id();
+        recent_next++;
+    }
     plat_mutex_unlock(&frz_lock);
     if (!ok) rt_fatal("memory: decommit %s %#llx+%#llx failed", what, (unsigned long long)a, (unsigned long long)n);
 }
@@ -297,6 +308,30 @@ static uint64_t image_bytes(void) {
 
 static int overlaps(uint64_t a, uint64_t n, uint64_t b, uint64_t m) { return a < b + m && b < a + n; }
 static int inside(uint64_t a, uint64_t n, RtRange r) { return a >= r.base && n <= r.size && a - r.base <= r.size - n; }
+
+void mem_describe_fault(uint64_t addr) {
+    const RtGuestLayout *g = &L;
+    const char *where = inside(addr, 1, (RtRange){g->heap.base, heap_size}) ? "the heap"
+                        : inside(addr, 1, g->heap)                          ? "the heap region above its size"
+                        : inside(addr, 1, g->alias)                         ? "the alias region"
+                        : inside(addr, 1, g->stack)                         ? "the stack region"
+                        : watched(addr, 1)                                  ? "the low block"
+                                                                            : "no guest region";
+    rt_logf("  memory: %#llx is in %s (heap %#llx+%#llx of %#llx, alias %#llx+%#llx)\n", (unsigned long long)addr,
+            where, (unsigned long long)g->heap.base, (unsigned long long)heap_size, (unsigned long long)g->heap.size,
+            (unsigned long long)g->alias.base, (unsigned long long)g->alias.size);
+    // No lock: the process is ending, and a decommit in flight on another thread may tear one entry.
+    uint64_t now = plat_now_ns();
+    uint32_t n = recent_next < RECENT_N ? recent_next : RECENT_N;
+    for (uint32_t k = 0; k < n; k++) {
+        uint32_t i = (recent_next - 1 - k) % RECENT_N;
+        int hit = addr >= recent[i].a && addr - recent[i].a < recent[i].n;
+        if (hit || k < 4)
+            rt_logf("  memory: %s decommit %#llx+%#llx (%s) by thread %u, %.3f ms before\n", hit ? "covering" : "recent",
+                    (unsigned long long)recent[i].a, (unsigned long long)recent[i].n, recent[i].what, recent[i].tid,
+                    (double)(now - recent[i].ns) / 1e6);
+    }
+}
 
 // ---- 0x01 SetHeapSize
 uint32_t mem_set_heap_size(uint64_t size, uint64_t *addr) {
