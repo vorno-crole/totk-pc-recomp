@@ -119,6 +119,7 @@ uint64_t plat_thread_cpu_ns(uint32_t tid) {
 
 struct PlatIntr {
     thread_act_t port;
+    x86_thread_state64_t st;   // the state plat_intr_stop read, which plat_intr_resume writes back redirected
 };
 
 PlatIntr *plat_intr_self(void) {
@@ -134,29 +135,32 @@ void plat_intr_free(PlatIntr *t) {
     free(t);
 }
 
+// A suspended thread still finishes what it was doing in the kernel. One stopped on a write fault in game code may set
+// up the call of the fault's signal handler after plat_intr_stop read its state: rip in _sigtramp, the handler's
+// arguments in the registers, rsp on the signal stack. Reading the state again for the redirect took that state, and
+// kern_ap_stub then went back into game code with it and without the handler: game data was corrupted, and a jump
+// landed on a stack address (tests/intr_fault_macos.c failed within seconds). So the redirect writes back the state
+// the stop read, with rip changed. If the kernel set the handler up in between, that call is dropped: the stub runs
+// with the registers of the fault and returns to the faulting instruction, which faults again and is handled then.
+// The dropped call leaves the kernel's "on the signal stack" mark set; fault_handler clears it (uc_onstack).
 int plat_intr_stop(PlatIntr *t, uint64_t *rip, uint64_t *rsp) {
     if (thread_suspend(t->port) != KERN_SUCCESS) return 0;
-    x86_thread_state64_t st;
     mach_msg_type_number_t n = x86_THREAD_STATE64_COUNT;
-    if (thread_get_state(t->port, x86_THREAD_STATE64, (thread_state_t)&st, &n) != KERN_SUCCESS) {
+    if (thread_get_state(t->port, x86_THREAD_STATE64, (thread_state_t)&t->st, &n) != KERN_SUCCESS) {
         thread_resume(t->port);
         return 0;
     }
-    *rip = st.__rip;
-    *rsp = st.__rsp;
+    *rip = t->st.__rip;
+    *rsp = t->st.__rsp;
     return 1;
 }
 
 int plat_intr_resume(PlatIntr *t, uint64_t to) {
     int ok = 1;
     if (to) {
-        x86_thread_state64_t st;
-        mach_msg_type_number_t n = x86_THREAD_STATE64_COUNT;
-        ok = thread_get_state(t->port, x86_THREAD_STATE64, (thread_state_t)&st, &n) == KERN_SUCCESS;
-        if (ok) {
-            st.__rip = to;
-            ok = thread_set_state(t->port, x86_THREAD_STATE64, (thread_state_t)&st, n) == KERN_SUCCESS;
-        }
+        x86_thread_state64_t st = t->st;
+        st.__rip = to;
+        ok = thread_set_state(t->port, x86_THREAD_STATE64, (thread_state_t)&st, x86_THREAD_STATE64_COUNT) == KERN_SUCCESS;
     }
     thread_resume(t->port);
     return ok;
@@ -872,8 +876,19 @@ static int access_ok_now(uint64_t addr, int write) {
 static volatile uint64_t retry_at;
 static volatile int32_t retry_n;
 
+// The kernel keeps a "on the signal stack" mark that sigreturn sets from uc_onstack. A handler call that
+// plat_intr_resume dropped never returned, so the mark stayed set and the next signal went on the interrupted stack;
+// the interrupted code is on the signal stack only when its rsp is inside it.
+static void onstack_fix(ucontext_t *u) {
+    stack_t ss;
+    if (sigaltstack(NULL, &ss) || (ss.ss_flags & SS_DISABLE)) return;
+    uint64_t sp = u->uc_mcontext->__ss.__rsp, lo = (uint64_t)(uintptr_t)ss.ss_sp;
+    u->uc_onstack = sp >= lo && sp - lo < ss.ss_size;
+}
+
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
+    onstack_fix(u);
     uint32_t err = u->uc_mcontext->__es.__err;
     int mem = sig == SIGSEGV || sig == SIGBUS;
     uint64_t at = (uint64_t)(uintptr_t)si->si_addr;

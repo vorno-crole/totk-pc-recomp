@@ -150,6 +150,25 @@ A port of Linux's signal handshake stopped only 551 of 2,000 tries inside its 20
 asynchronous preemption nearly idle. `thread_suspend` with `thread_get_state` and `thread_set_state` stopped 2,000 of
 2,000 and redirected 200 of 200.
 
+A suspended thread still finishes its work in the kernel. A game thread stopped on a write-watch fault may have the
+call of its signal handler set up after `plat_intr_stop` read its state (rip in `_sigtramp`, the handler's arguments
+in the registers, rsp on the signal stack). `plat_intr_resume` used to read the state again and change only rip, so
+`kern_ap_stub` saved that state and went back into game code with it, without running the handler: the crash dump
+of `tests/intr_fault_macos.c` showed the fault handler's address in rdi, `UC_FLAVOR` (30) in rsi, `SIGBUS` (10) in rdx
+and stack addresses in rcx and r8, at the store of the writer's loop. `plat_intr_resume` now writes back the state
+the stop read, with rip changed: a handler call set up in between is dropped, the stub returns to the faulting
+instruction, and that faults again. The dropped call leaves the kernel's on-signal-stack mark set, so `fault_handler`
+sets `uc_onstack` from whether the interrupted rsp is on the signal stack. `thread_info`'s run state does not tell the
+two cases apart: a thread stopped in user code and one stopped inside a fault both report `WAITING`.
+
+Taking the faults on a Mach exception port instead, where the faulting thread waits with its registers untouched, also
+removes the race, but a fault then costs 13-14 us instead of about 6 us, and the game fell from 60 to 25 fps in
+a scripted run, so the port was not kept.
+
+`tests/intr_fault_macos.c` stops and redirects a thread that stores to watched pages while the watch is reset. With
+10 s runs and 20 or 5 us between stops, the old resume crashed in every setting; the new one passed each, up to
+131,083 redirects with 0 words wrong. A fault costs the same as before (6.6 us).
+
 ### Stress test
 
 `tests/plat_stress_macos.c` runs the platform file without game files. Three runs passed: 1,200,000 contended lock
@@ -366,14 +385,17 @@ The game builds and plays on this machine: title screen, saves, and the opening 
 | 4. Boot | title screen | done |
 | 5. Play | a stable 60 fps in the open world | started: the opening cave runs |
 
-Two crashes in play on 2026-11-03, a few minutes in each: lifted code wrote through a garbage table pointer in
-`main+0xa2ea20`, and later a jump landed on a stack address (`executing address 0x7002f3210ad0`). Both were on the same
-game thread, under `main+0xacf8dc` and `main+0x27d2b2c`. The likely cause is macOS-only: a thread-local is reached
-through a lookup call clang treats as pure, so a function computes its address once and keeps it. `fiber_main`
-(`kernel.c`) kept `&tcur` in a register across `rt_call`, the guest fiber's whole run; when that fiber came back on
-another host thread, it switched fibers with the first thread's state. `PLAT_TLS_VAR` (`platform.h`) now looks the
-address up at every use on macOS, for `tcur` and `ipc.c`'s `t_req`; the other thread-locals are not used across a
-fiber switch. A 3-minute scripted run plays through after the fix; long play has to confirm it.
+Crashes in play on 2026-11-03, a few minutes in each, all on the same game thread (under `main+0xacf8dc` and
+`main+0x27d2b2c`): a write through a garbage table pointer in `main+0xa2ea20`, a jump to a stack address, and a write
+to a page that the instruction before had read and that was gone at the write. With `TOTK_ASYNC_PREEMPT=0` the game
+played on, so the asynchronous preemption caused them; see [Thread interruption](#thread-interruption) for the race
+and the fix.
+
+A second macOS-only hazard turned up on the way and is fixed too: a thread-local is reached through a lookup call clang
+treats as pure, so a function computes its address once and keeps it. `fiber_main` (`kernel.c`) kept `&tcur` in a
+register across `rt_call`, the guest fiber's whole run, and a fiber that came back on another host thread would switch
+fibers with the first thread's state. `PLAT_TLS_VAR` (`platform.h`) looks the address up at every use on macOS, for
+`tcur` and `ipc.c`'s `t_req`; the other thread-locals are not used across a fiber switch.
 
 The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
