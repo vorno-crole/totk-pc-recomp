@@ -192,6 +192,7 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Window | a thread of its own | AppKit needs the main thread: the main thread runs the window and the game runs on another |
 | Vulkan | system driver | MoltenVK beside the executable, `VK_DRIVER_FILES`, `VK_KHR_portability_enumeration`, `VK_KHR_portability_subset` |
 | Memory mode | shadow copies | imports, as on Windows (`vk_memory.c`); mirror on, since the GPU is discrete |
+| Thread-locals across fiber switches | the thread register gives each access the running thread's variable | the address comes from a call clang merges within a function, so a fiber resumed on another thread kept the first thread's; `PLAT_TLS_VAR` looks it up at each use |
 | Overlay GPU numbers | sysfs `gpu_busy_percent`, `mem_info_vram_used`; ADL for the rest | the `PerformanceStatistics` of the GPU's IOAccelerator: `Device Utilization %`, `inUseVidMemoryBytes`, `Temperature(C)`, `Total Power(W)`, `Core Clock(MHz)`. MoltenVK's `deviceLUID` is Metal's `registryID` big-endian, the accelerator's registry entry ID, which picks the GPU |
 
 `runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
@@ -365,12 +366,14 @@ The game builds and plays on this machine: title screen, saves, and the opening 
 | 4. Boot | title screen | done |
 | 5. Play | a stable 60 fps in the open world | started: the opening cave runs |
 
-Open crash, seen once on 2026-11-03, after about 4 minutes of play: lifted code (`f_7000a2ea20`, guest `main+0xa2ea20`,
-called from `main+0xa2e908`) wrote to `0x1f662`. The store is `entry->ptr[min(i, entry->count)]` through a table of
-16-byte `{count, pointer}` entries, so the entry held a garbage pointer: game data was wrong, not the address
-arithmetic. It came a second after the frame limit was changed from 90 to 60 in the overlay menu, with the menu open
-and a movie decoder just configured. Whether it is macOS-specific (a guest write lost or overwritten) or a game bug
-under that timing is not known yet.
+Two crashes in play on 2026-11-03, a few minutes in each: lifted code wrote through a garbage table pointer in
+`main+0xa2ea20`, and later a jump landed on a stack address (`executing address 0x7002f3210ad0`). Both were on the same
+game thread, under `main+0xacf8dc` and `main+0x27d2b2c`. The likely cause is macOS-only: a thread-local is reached
+through a lookup call clang treats as pure, so a function computes its address once and keeps it. `fiber_main`
+(`kernel.c`) kept `&tcur` in a register across `rt_call`, the guest fiber's whole run; when that fiber came back on
+another host thread, it switched fibers with the first thread's state. `PLAT_TLS_VAR` (`platform.h`) now looks the
+address up at every use on macOS, for `tcur` and `ipc.c`'s `t_req`; the other thread-locals are not used across a
+fiber switch. A 3-minute scripted run plays through after the fix; long play has to confirm it.
 
 The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.

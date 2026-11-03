@@ -61,6 +61,25 @@ void plat_fiber_unself(void);             // the calling thread stops being a fi
 PlatFiber *plat_fiber_new(size_t stack, void (*fn)(void *arg), void *arg);
 void plat_fiber_switch(PlatFiber *to);    // from the fiber the calling thread runs
 void plat_fiber_free(PlatFiber *f);       // a fiber nobody runs
+// A thread-local variable that code reads on both sides of a fiber switch: PLAT_TLS_VAR(type, name) defines it and
+// makes `name` an lvalue of it. On macOS a thread-local is reached through a lookup call that clang treats as pure, so
+// it looks the address up once per function and keeps it across calls; a fiber that resumed on another thread then
+// reads the first thread's variable (kernel.c fiber_main kept &tcur in a register across rt_call). The accessor is a
+// call clang cannot merge, so each use looks the address up on the thread that runs it. Elsewhere the thread register
+// gives each access the running thread's variable, and the variable is a plain thread-local.
+#ifdef __APPLE__
+#define PLAT_TLS_VAR(type, name)                                                                                       \
+    static _Thread_local type name##_tls;                                                                              \
+    static __attribute__((noinline)) type *name##_ref(void) {                                                          \
+        type *p = &name##_tls;                                                                                         \
+        __asm__ volatile("" : "+r"(p));                                                                                \
+        return p;                                                                                                      \
+    }
+#define PLAT_TLS(name) (*name##_ref())
+#else
+#define PLAT_TLS_VAR(type, name) static _Thread_local type name;
+#define PLAT_TLS(name) name
+#endif
 
 // A jump back to a point saved earlier on the same thread, without unwinding the frames in between (no SEH, no C++
 // cleanups): the kernel's ExitThread leaves the lifted frames this way. plat_jmp_save returns 0 when it saves and 1

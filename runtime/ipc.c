@@ -31,7 +31,8 @@ static const struct { const char *name; IpcHandler handler; } services[] = {
 
 static volatile int32_t g_live;
 static volatile int64_t g_released, g_requests;
-static _Thread_local const Cpu *t_req;   // guest context of the request being served
+PLAT_TLS_VAR(const Cpu *, t_req)   // guest context of the request being served; a service may run guest code
+#define t_req PLAT_TLS(t_req)
 
 long ipc_sessions_live(void) { return plat_cas32(&g_live, 0, 0); }
 uint64_t ipc_sessions_released(void) { return (uint64_t)plat_cas64(&g_released, 0, 0); }

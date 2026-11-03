@@ -108,7 +108,8 @@ struct RtThread {
 
 static PlatMutex G = PLAT_MUTEX_INIT;
 static struct { int type; void *obj; } g_h[MAX_H];
-static _Thread_local RtThread *tcur;
+PLAT_TLS_VAR(RtThread *, tcur)   // read before and after fiber switches (platform.h)
+#define tcur PLAT_TLS(tcur)
 _Static_assert(offsetof(RtThread, preempt) == 0, "host.h kern_preempt_pending reads the first int");
 _Static_assert(offsetof(RtThread, host_depth) == sizeof(int), "host.h kern_host_depth reads the second int");
 static RtThread *g_all, *g_wait, *g_main;
