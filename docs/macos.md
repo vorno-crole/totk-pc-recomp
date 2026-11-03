@@ -192,6 +192,7 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Window | a thread of its own | AppKit needs the main thread: the main thread runs the window and the game runs on another |
 | Vulkan | system driver | MoltenVK beside the executable, `VK_DRIVER_FILES`, `VK_KHR_portability_enumeration`, `VK_KHR_portability_subset` |
 | Memory mode | shadow copies | imports, as on Windows (`vk_memory.c`); mirror on, since the GPU is discrete |
+| Overlay GPU numbers | sysfs `gpu_busy_percent`, `mem_info_vram_used`; ADL for the rest | the `PerformanceStatistics` of the GPU's IOAccelerator: `Device Utilization %`, `inUseVidMemoryBytes`, `Temperature(C)`, `Total Power(W)`, `Core Clock(MHz)`. MoltenVK's `deviceLUID` is Metal's `registryID` big-endian, the accelerator's registry entry ID, which picks the GPU |
 
 `runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
 

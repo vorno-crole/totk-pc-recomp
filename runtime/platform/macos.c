@@ -28,6 +28,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <CoreFoundation/CoreFoundation.h>
+#include <IOKit/IOKitLib.h>
 #include <SDL3/SDL_clipboard.h>
 
 #include "platform.h"
@@ -1227,11 +1229,15 @@ int plat_font_path(const char *lang, char *out, size_t cap) {
     return f && plat_file_exists(f) && snprintf(out, cap, "%s", f) < (int)cap;
 }
 
+// "macOS 15.4 (Intel)", or "(Rosetta)" when this x86-64 build runs translated on Apple silicon.
 int plat_os_version(char *out, size_t cap) {
     char v[32] = "";
     size_t n = sizeof v;
     sysctlbyname("kern.osproductversion", v, &n, NULL, 0);
-    return snprintf(out, cap, "macOS %s", v) < (int)cap;
+    int translated = 0;
+    n = sizeof translated;
+    if (sysctlbyname("sysctl.proc_translated", &translated, &n, NULL, 0)) translated = 0;
+    return snprintf(out, cap, "macOS %s (%s)", v, translated ? "Rosetta" : "Intel") < (int)cap;
 }
 
 int plat_is_wine(void) { return 0; }
@@ -1394,14 +1400,66 @@ void *plat_lib_sym(void *lib, const char *name) { return lib ? dlsym(lib, name) 
 struct PlatLoad {
     uint64_t busy, total;   // the previous call's ticks; total 0 before the first
     uint64_t proc_ns;
+    io_service_t gpu;       // the GPU's IOAccelerator, whose PerformanceStatistics the driver keeps current; 0: none
 };
 
-PlatLoad *plat_load_open(const uint8_t *gpu_luid, int pci_bus) {
-    (void)gpu_luid, (void)pci_bus;
-    return calloc(1, sizeof(PlatLoad));
+// MoltenVK's deviceLUID is the Metal device's registryID, big-endian (MoltenVK's MVKDevice.mm,
+// MVKPhysicalDevice::populateDeviceIDProperties), which is the registry entry ID of its IOAccelerator. Without a LUID,
+// or with no accelerator of that ID, the first accelerator that has statistics.
+static io_service_t accelerator_of(const uint8_t *luid) {
+    uint64_t want = 0;
+    if (luid)
+        for (int i = 0; i < 8; i++) want = want << 8 | luid[i];
+    io_iterator_t it;
+    if (IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching("IOAccelerator"), &it) != KERN_SUCCESS) return 0;
+    io_service_t found = 0, first = 0;
+    for (io_service_t s; (s = IOIteratorNext(it));) {
+        uint64_t id = 0;
+        CFTypeRef st = IORegistryEntryCreateCFProperty(s, CFSTR("PerformanceStatistics"), kCFAllocatorDefault, 0);
+        int has = st != NULL;
+        if (st) CFRelease(st);
+        if (has && want && IORegistryEntryGetRegistryEntryID(s, &id) == KERN_SUCCESS && id == want && !found) {
+            found = s;
+            continue;
+        }
+        if (has && !first) {
+            first = s;
+            continue;
+        }
+        IOObjectRelease(s);
+    }
+    IOObjectRelease(it);
+    if (found && first) IOObjectRelease(first);
+    return found ? found : first;
 }
 
-void plat_load_close(PlatLoad *l) { free(l); }
+PlatLoad *plat_load_open(const uint8_t *gpu_luid, int pci_bus) {
+    (void)pci_bus;
+    PlatLoad *l = calloc(1, sizeof(PlatLoad));
+    if (l) l->gpu = accelerator_of(gpu_luid);
+    return l;
+}
+
+void plat_load_close(PlatLoad *l) {
+    if (l && l->gpu) IOObjectRelease(l->gpu);
+    free(l);
+}
+
+// One number of the GPU's PerformanceStatistics; -1 when the driver does not give it.
+static double gpu_stat(CFDictionaryRef d, CFStringRef key) {
+    CFTypeRef v = CFDictionaryGetValue(d, key);
+    double x;
+    return v && CFGetTypeID(v) == CFNumberGetTypeID() && CFNumberGetValue(v, kCFNumberDoubleType, &x) ? x : -1;
+}
+
+// The statistics AMD's macOS drivers keep ("Device Utilization %", the load Activity Monitor shows), read fresh on
+// each call; NULL without them.
+static CFDictionaryRef gpu_stats(PlatLoad *l) {
+    if (!l || !l->gpu) return NULL;
+    CFTypeRef st = IORegistryEntryCreateCFProperty(l->gpu, CFSTR("PerformanceStatistics"), kCFAllocatorDefault, 0);
+    if (st && CFGetTypeID(st) != CFDictionaryGetTypeID()) CFRelease(st), st = NULL;
+    return st;
+}
 
 void plat_cpu_load(PlatLoad *l, float *total_pct, float *proc_pct, float *temp_c) {
     *total_pct = *proc_pct = *temp_c = -1;
@@ -1422,8 +1480,23 @@ void plat_cpu_load(PlatLoad *l, float *total_pct, float *proc_pct, float *temp_c
 }
 
 void plat_gpu_load(PlatLoad *l, float *load_pct, float *vram_used_mb) {
-    (void)l;
     *load_pct = *vram_used_mb = -1;
+    CFDictionaryRef d = gpu_stats(l);
+    if (!d) return;
+    double load = gpu_stat(d, CFSTR("Device Utilization %")), used = gpu_stat(d, CFSTR("inUseVidMemoryBytes"));
+    if (load >= 0) *load_pct = (float)load;
+    if (used >= 0) *vram_used_mb = (float)(used / 1048576.0);
+    CFRelease(d);
+}
+
+void plat_gpu_sensors(PlatLoad *l, float *temp_c, float *power_w, float *clock_mhz) {
+    *temp_c = *power_w = *clock_mhz = -1;
+    CFDictionaryRef d = gpu_stats(l);
+    if (!d) return;
+    *temp_c = (float)gpu_stat(d, CFSTR("Temperature(C)"));
+    *power_w = (float)gpu_stat(d, CFSTR("Total Power(W)"));
+    *clock_mhz = (float)gpu_stat(d, CFSTR("Core Clock(MHz)"));
+    CFRelease(d);
 }
 
 void plat_mem_info(float *used_mb, float *total_mb, float *proc_mb) {

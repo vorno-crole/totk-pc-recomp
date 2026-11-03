@@ -1517,6 +1517,7 @@ static void perf_full_draw(const MenuTarget *t, float scale) {
     perf_picture(t, pic_c);
     if (s.gpu_name[0]) ImGui::TextDisabled("%s", s.gpu_name);
     if (s.cpu_name[0]) ImGui::TextDisabled("%s", s.cpu_name);
+    if (s.os_name[0]) ImGui::TextDisabled("%s", s.os_name);
     ImGui::End();
 }
 
