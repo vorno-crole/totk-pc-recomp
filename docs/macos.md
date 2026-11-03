@@ -213,6 +213,7 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Memory mode | shadow copies | imports, as on Windows (`vk_memory.c`); mirror on, since the GPU is discrete |
 | Thread-locals across fiber switches | the thread register gives each access the running thread's variable | the address comes from a call clang merges within a function, so a fiber resumed on another thread kept the first thread's; `PLAT_TLS_VAR` looks it up at each use |
 | Overlay GPU numbers | sysfs `gpu_busy_percent`, `mem_info_vram_used`; ADL for the rest | the `PerformanceStatistics` of the GPU's IOAccelerator: `Device Utilization %`, `inUseVidMemoryBytes`, `Temperature(C)`, `Total Power(W)`, `Core Clock(MHz)`. MoltenVK's `deviceLUID` is Metal's `registryID` big-endian, the accelerator's registry entry ID, which picks the GPU |
+| 3D render targets | 2D array views of the 3D image's depth planes (`2D_ARRAY_COMPATIBLE`) | MoltenVK makes such images only in Metal placement heaps, which it leaves off on AMD (`imageView2DOn3DImage` 0), so each drawn level gets a 2D array stand-in that every pass end copies back (`vk_exec.c` `vol_target`) |
 
 `runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
 
@@ -352,10 +353,14 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
 
 
 
-- **3D render targets fail.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) fail with `MTLHeap must be enabled
-  to create 2D-on-3D or block texel view compatible images`, retried every frame. `MVK_CONFIG_USE_MTLHEAP=1` did not help on
-  Homebrew's build or the Khronos build. These include the grading LUT of the menu's background blur. The checkout of
-  MoltenVK's newer sources no longer has this message and defaults heaps on, so building it is an option.
+- **3D render targets failed.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) failed with `MTLHeap must be
+  enabled to create 2D-on-3D or block texel view compatible images`, retried every frame. They include the sky's 256x32x16
+  scattering volume, R8 volumes of the sizes of the BC4 volumes drawn at the logo, and the grading LUT of the menu's background blur; without
+  them the sky was a murky green-grey. MoltenVK 1.4.2 enables placement heaps on AMD only with `MVK_CONFIG_USE_MTLHEAP=2`
+  (MoltenVK, `MVKDevice.mm`: "AMD support for MTLHeap is buggy"), and that would move every allocation into heaps. The
+  images are now made without the flag when the portability subset reports no `imageView2DOn3DImage`, and draws into them
+  go through 2D array stand-ins, as 3D BC targets already did ([table](#what-differs-from-linux)). A scripted run with the
+  camera on the sky shows a blue sky and clouds where the build before showed green.
 - **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
   affects every frame's pacing, and is the first thing to look at for the frame rate.
 

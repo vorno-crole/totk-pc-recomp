@@ -390,8 +390,10 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
         (d->target == NVN_TEXTURE_TARGET_CUBEMAP || d->target == NVN_TEXTURE_TARGET_CUBEMAP_ARRAY))
         flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     // NVN renders into a 3D texture slice by slice (a view's min layer is the depth plane, nvn_mtl.m), e.g. the
-    // grading LUT of the menu background blur. Vulkan needs a 2D view of the slice for that.
-    if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)) flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+    // grading LUT of the menu background blur. Vulkan needs a 2D view of the slice for that; a device without such
+    // views draws into a 2D array stand-in instead (vk_exec.c vol_target).
+    if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) && !c->no_2d_on_3d)
+        flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .flags = flags, .imageType = type, .format = f.vk,
                             .extent = {w, h, depth}, .mipLevels = levels, .arrayLayers = layers,
                             .samples = (VkSampleCountFlagBits)samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = usage,
@@ -400,7 +402,7 @@ static Tex *create_tex(const tex_t *t, const TexKey *k, int defer_init) {
     // TOTK_BLOCK_VIEWS_3D (default 0): a 3D BC image also gets block views. On RDNA2 cards (driver 26.10.1, issue #5)
     // the 32x32x32 BC4 volume the game creates at the logo, made BLOCK_TEXEL_VIEW_COMPATIBLE and 2D_ARRAY_COMPATIBLE,
     // took a GPU write just past the end of its memory: device lost at the first submit after it when the image ended
-    // its memory block. Draws into a 3D BC image go through a stand-in instead (vk_exec.c bc_target).
+    // its memory block. Draws into a 3D BC image go through a stand-in instead (vk_exec.c vol_target).
     static int bv3d = -1;
     if (bv3d < 0) {
         bv3d = rt_knob("BLOCK_VIEWS_3D", "0");

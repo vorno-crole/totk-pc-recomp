@@ -43,6 +43,8 @@ typedef struct VkCtx {
     // (attachable images get feedback usage, a by-region barrier inside the pass); else (or TOTK_FEEDBACK=restart)
     // VK_FEEDBACK_RESTART (the pass ends and restarts behind the full barrier).
     int feedback;                           // VK_FEEDBACK_*
+    int no_2d_on_3d;                        // no 2D views of 3D images (MoltenVK on AMD): draws into a 3D texture go
+                                            // through a 2D array stand-in (vk_exec.c vol_target)
     uint32_t min_imported_host_alignment;   // VK_EXT_external_memory_host
     int device_index;                       // index in vkEnumeratePhysicalDevices
 } VkCtx;
