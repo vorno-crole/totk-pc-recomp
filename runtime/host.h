@@ -168,6 +168,8 @@ void mem_thaw(uint64_t a, uint64_t n);                     // makes the frozen r
                                                            // before a kernel write (file read) into guest memory
 void mem_freeze_stats(uint64_t *frozen, uint64_t *freezes, uint64_t *fault_thaws, uint64_t *other_thaws);
                                                            // regions frozen now; freezes and thaws since the last call
+void mem_describe_fault(uint64_t addr);                     // crash report: the guest region of addr and the last
+                                                           // decommits, any covering it
 void mem_kernel_free(void *p, uint64_t size);              // TLR/TLS reuse after thread exit
 int mem_guest_readable(uint64_t a, uint64_t n);            // [a, a+n) can be read without a fault: inside a loaded
                                                            // module or the committed heap answered from the layout,
