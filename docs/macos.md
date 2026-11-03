@@ -155,7 +155,8 @@ asynchronous preemption nearly idle. `thread_suspend` with `thread_get_state` an
 `tests/plat_stress_macos.c` runs the platform file without game files. Three runs passed: 1,200,000 contended lock
 increments with readers alongside, a timed wait of 20.03 ms for 20 ms, 1,000 fiber switches, and the interruption numbers
 above. In its write-watch part three threads write random pages while the main thread syncs a copy every 2 ms: about
-500,000 pages over 800 rounds in 3 s, and 0 words differ at the end.
+500,000 pages over 800 rounds in 3 s, and 0 words differ at the end. Its last part reads a 4 MiB file into watched
+memory while the main thread resets the watch (see the `EFAULT` note under "What differs from Linux").
 
 ### Address space
 
@@ -195,7 +196,12 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 `runtime/platform/macos.c` is `linux.c` section by section. `check_platform.py` still reports no stray Win32 uses.
 
 A kernel write into a page the tracker holds read-only fails with `EFAULT` instead of faulting. `plat_file_pread` therefore
-touches the buffer's pages first, so each one is marked written and made writable before the read.
+touches the buffer's pages first, so each one is marked written and made writable before the read. That alone is a race:
+the render thread resets watched ranges every frame, and a reset between the touch and the read protects a page again.
+The first build crashed this way about a minute into the cave (`RomFS: read of 142572 bytes ... refused: the buffer is
+not writable`, then `FATAL: RomFS read failure`). The read now runs in 256 KiB parts, each touched just before it and
+read again after an `EFAULT`. With 4 MiB reads against a reset every 2 ms, the stress test failed 399 of 399 reads
+before and fails 0 of 355 after.
 
 ## Lessons carried over from the earlier ports
 

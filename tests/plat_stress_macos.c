@@ -84,6 +84,15 @@ static void writer(void *a) {
         p[(pg * 4096) / 4 + id] = (uint32_t)seq++;
     }
 }
+#define PR_N (4u << 20)
+static PlatFile *pr_file;
+static volatile uint64_t pr_reads, pr_fail;
+static void reader(void *a) {
+    while (!ww_stop) {
+        if (plat_file_pread(pr_file, (void *)(uintptr_t)BASE, PR_N, 0) != PR_N) pr_fail++;
+        pr_reads++;
+    }
+}
 int main(void) {
     setvbuf(stdout, 0, _IONBF, 0);
     PlatThread *t[8];
@@ -173,8 +182,30 @@ int main(void) {
             bad++;
     printf("write watch: %llu rounds, %llu pages copied, %zu words differ from memory after the last sync\n", rounds,
            total, bad);
-    int fd = 0;
-    (void)fd;
+    // File reads into watched memory while the main thread resets the watch: a reset between plat_file_pread's touch
+    // and the kernel's write fails the read with EFAULT unless the read retries (the RomFS crash in docs/macos.md).
+    const char *path = "plat_stress_pread.bin";
+    uint8_t *src = malloc(PR_N);
+    for (size_t i = 0; i < PR_N; i++)
+        src[i] = (uint8_t)(i * 131 + 7);
+    CK(plat_file_write(path, src, PR_N));
+    pr_file = plat_file_open(path);
+    CK(pr_file != NULL);
+    ww_stop = 0;
+    PlatThread *rd = plat_thread_new(reader, 0, "rd");
+    t0 = plat_now_ns();
+    while (plat_now_ns() - t0 < 3000000000ull) {
+        CK(plat_mem_written(BASE, N, pg, N / 4096, 1) != UINT64_MAX);
+        plat_sleep_ms(2);
+    }
+    ww_stop = 1;
+    plat_thread_join(rd);
+    CK(pr_fail == 0);
+    CK(memcmp((void *)(uintptr_t)BASE, src, PR_N) == 0);
+    printf("pread under resets: %llu reads of %u KiB, %llu failed\n", pr_reads, PR_N >> 10, pr_fail);
+    plat_file_close(pr_file);
+    plat_file_delete(path);
+    free(src);
     printf("%s\n", fails ? "FAILED" : "all passed");
     return fails != 0;
 }

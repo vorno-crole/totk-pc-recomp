@@ -940,12 +940,29 @@ void plat_file_close(PlatFile *f) {
     if (f) close(fd_of(f));
 }
 
+// The write watch's reset may protect a page again between ww_touch and the read (the render thread resets watched
+// ranges every frame), and the kernel then fails the read with EFAULT. So the read goes in parts of PREAD_PART bytes,
+// each touched just before it and read again after an EFAULT; only a part that keeps failing is a real read-only page.
+#define PREAD_PART (256u << 10)
+#define PREAD_TRIES 64
+
 int64_t plat_file_pread(PlatFile *f, void *buf, uint32_t n, uint64_t off) {
-    ww_touch((uint64_t)(uintptr_t)buf, n);
-    ssize_t k;
-    do k = pread(fd_of(f), buf, n, (off_t)off);
-    while (k < 0 && errno == EINTR);
-    return k >= 0 ? k : errno == EFAULT ? -2 : -1;
+    uint8_t *p = buf;
+    uint64_t done = 0;
+    while (done < n) {
+        uint32_t part = n - done < PREAD_PART ? (uint32_t)(n - done) : PREAD_PART;
+        ssize_t k;
+        for (int tries = 0;; tries++) {
+            ww_touch((uint64_t)(uintptr_t)(p + done), part);
+            do k = pread(fd_of(f), p + done, part, (off_t)(off + done));
+            while (k < 0 && errno == EINTR);
+            if (k >= 0 || errno != EFAULT || tries == PREAD_TRIES) break;
+        }
+        if (k < 0) return errno == EFAULT ? -2 : -1;
+        done += (uint64_t)k;
+        if ((uint32_t)k < part) break;   // the end of the file
+    }
+    return (int64_t)done;
 }
 
 int plat_file_id(PlatFile *f, PlatFileId *out) {
