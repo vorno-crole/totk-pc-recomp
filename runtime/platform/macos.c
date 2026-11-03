@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/event.h>
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
@@ -963,6 +964,8 @@ const void *plat_file_map(PlatFile *f) {
     return v == MAP_FAILED ? NULL : v;
 }
 
+int plat_fs_os_error(void) { return errno; }
+
 static int fs_err(int e) {
     switch (e) {
     case ENOENT: case ENOTDIR: return PLAT_FS_NOT_FOUND;
@@ -981,14 +984,34 @@ int plat_fs_kind(const char *path) {
 
 int plat_fs_mkdir(const char *path) { return mkdir(path, 0755) ? fs_err(errno) : PLAT_FS_OK; }
 
-int plat_fs_rmdir(const char *path) {
+// Deleting needs write access to the directory holding the entry, which a read-only directory (plat_file_set_readonly,
+// or one copied from another emulator's save folder) lacks; on Windows the read-only attribute of a directory does not
+// stop deleting what is in it. After EACCES the parent gets its owner's write bit back and the delete runs once more.
+static int parent_writable(const char *path) {
+    char dir[PATH_MAX];
+    if (snprintf(dir, sizeof dir, "%s", path) >= (int)sizeof dir) return 0;
+    char *cut = strrchr(dir, '/');
+    if (!cut) return 0;
+    *cut = 0;
+    if (!dir[0]) return 0;
     struct stat st;
-    if (!lstat(path, &st) && S_ISLNK(st.st_mode)) return unlink(path) ? fs_err(errno) : PLAT_FS_OK;
-    return rmdir(path) ? fs_err(errno) : PLAT_FS_OK;
+    return !stat(dir, &st) && !(st.st_mode & S_IWUSR) && chmod(dir, (st.st_mode | S_IWUSR) & 07777) == 0;
 }
 
-// Deleting needs write access to the directory, not to the file: a read-only file goes as any other.
-int plat_fs_unlink(const char *path) { return unlink(path) ? fs_err(errno) : PLAT_FS_OK; }
+static int remove_entry(const char *path, int dir) {
+    int r = dir ? rmdir(path) : unlink(path);
+    if (r && errno == EACCES && parent_writable(path)) r = dir ? rmdir(path) : unlink(path);
+    return r ? fs_err(errno) : PLAT_FS_OK;
+}
+
+int plat_fs_rmdir(const char *path) {
+    struct stat st;
+    if (!lstat(path, &st) && S_ISLNK(st.st_mode)) return remove_entry(path, 0);
+    return remove_entry(path, 1);
+}
+
+// A read-only file goes as any other: deleting asks for write access to the directory only.
+int plat_fs_unlink(const char *path) { return remove_entry(path, 0); }
 
 // RENAME_EXCL keeps Windows' rule that a rename never replaces; a file system without it gets a check first, which
 // another process could race but the save directories are ours.
@@ -1106,8 +1129,10 @@ size_t plat_getenv(const char *name, char *out, size_t cap) {
 }
 
 // Cached per thread: plat_rmutex_lock asks on every acquire, hundreds of thousands of times a second in play. The low
-// 32 bits of the system-wide thread id stay unique for the life of a game.
-uint32_t plat_thread_id(void) {
+// 32 bits of the system-wide thread id stay unique for the life of a game. noinline: a fiber may resume on another
+// thread (platform.h), and a caller that inlined this could keep the address of tid it computed before a
+// plat_fiber_switch; as a call it reads the slot of the thread it runs on.
+__attribute__((noinline)) uint32_t plat_thread_id(void) {
     static __thread uint32_t tid;
     if (!tid) {
         uint64_t id = 0;
@@ -1155,6 +1180,8 @@ int plat_os_version(char *out, size_t cap) {
     sysctlbyname("kern.osproductversion", v, &n, NULL, 0);
     return snprintf(out, cap, "macOS %s", v) < (int)cap;
 }
+
+int plat_is_wine(void) { return 0; }
 
 int plat_stderr_path(char *out, size_t cap) {
     struct stat st;
@@ -1440,4 +1467,88 @@ long plat_child_read(PlatChild *c, void *buf, size_t cap) {
     do k = read(c->out, buf, cap);
     while (k < 0 && errno == EINTR);
     return (long)k;
+}
+
+// ---- restart
+// TOTK_RESTART_WAIT names the process that called plat_restart, as its id and start time in microseconds (kinfo_proc's
+// p_starttime): a process that has only reused the id is not waited for. Waiting keeps the new process off the old
+// one's files (the log it moves at start, the saves) until the old one is gone. The new process gets no descriptor past
+// stderr (POSIX_SPAWN_CLOEXEC_DEFAULT with 0-2 inherited), and the default signal mask and dispositions, whatever the
+// calling thread had.
+#define RESTART_WAIT "TOTK_RESTART_WAIT"
+
+// The start time of process pid in microseconds, 0 when it is gone.
+static unsigned long long process_start(int pid) {
+    struct kinfo_proc kp;
+    size_t n = sizeof kp;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, pid};
+    if (sysctl(mib, 4, &kp, &n, NULL, 0) || n != sizeof kp) return 0;
+    struct timeval t = kp.kp_proc.p_starttime;
+    return (unsigned long long)t.tv_sec * 1000000ull + (unsigned long long)t.tv_usec;
+}
+
+// Fills the actions and attributes both plat_restart and plat_spawn start a child with.
+static void spawn_setup(posix_spawn_file_actions_t *fa, posix_spawnattr_t *at, short flags) {
+    posix_spawn_file_actions_init(fa);
+    for (int fd = 0; fd < 3; fd++) posix_spawn_file_actions_addinherit_np(fa, fd);
+    posix_spawnattr_init(at);
+    sigset_t none, all;
+    sigemptyset(&none);
+    sigfillset(&all);
+    posix_spawnattr_setsigmask(at, &none);
+    posix_spawnattr_setsigdefault(at, &all);
+    posix_spawnattr_setflags(at, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT | flags);
+}
+
+int plat_restart(void) {
+    char exe[PATH_MAX], wait[64];
+    if (!*_NSGetArgc() || !plat_exe_path(exe, sizeof exe)) return 0;
+    snprintf(wait, sizeof wait, "%d.%llu", (int)getpid(), process_start((int)getpid()));
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    spawn_setup(&fa, &at, 0);
+    setenv(RESTART_WAIT, wait, 1);
+    pid_t pid;
+    int e = posix_spawn(&pid, exe, &fa, &at, *_NSGetArgv(), environ);
+    unsetenv(RESTART_WAIT);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    return e == 0;
+}
+
+int plat_spawn(const char *const *argv, const char *cwd) {
+    posix_spawn_file_actions_t fa;
+    posix_spawnattr_t at;
+    spawn_setup(&fa, &at, POSIX_SPAWN_SETSID);
+    posix_spawn_file_actions_addchdir_np(&fa, cwd);
+    pid_t pid;
+    int e = posix_spawn(&pid, argv[0], &fa, &at, (char *const *)argv, environ);
+    posix_spawnattr_destroy(&at);
+    posix_spawn_file_actions_destroy(&fa);
+    return e == 0;
+}
+
+int plat_restart_wait(uint32_t timeout_ms) {
+    const char *v = getenv(RESTART_WAIT);
+    if (!v) return 0;
+    int pid = 0;
+    unsigned long long start = 0;
+    int ok = sscanf(v, "%d.%llu", &pid, &start) == 2 && pid > 0 && start;
+    unsetenv(RESTART_WAIT);   // the processes this one starts do not wait again
+    if (!ok) return 0;
+    // The exit watch is registered first: a start time that still matches then proves it is that process, not a new one
+    // with the id. ESRCH: it is already gone.
+    int kq = kqueue();
+    if (kq < 0) return 0;
+    struct kevent ev;
+    EV_SET(&ev, (uintptr_t)pid, EVFILT_PROC, EV_ADD | EV_ONESHOT, NOTE_EXIT, 0, NULL);
+    int r = 0;
+    if (kevent(kq, &ev, 1, NULL, 0, NULL) == 0 && process_start(pid) == start) {
+        struct timespec t = {timeout_ms / 1000, (long)(timeout_ms % 1000) * 1000000};
+        do r = kevent(kq, NULL, 0, &ev, 1, &t);
+        while (r < 0 && errno == EINTR);
+        r = r > 0 ? 1 : -1;
+    }
+    close(kq);
+    return r;
 }
