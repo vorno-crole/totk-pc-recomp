@@ -203,6 +203,17 @@ not writable`, then `FATAL: RomFS read failure`). The read now runs in 256 KiB p
 read again after an `EFAULT`. With 4 MiB reads against a reset every 2 ms, the stress test failed 399 of 399 reads
 before and fails 0 of 355 after.
 
+A later run died after 72 minutes, idle in the menu, with a macOS crash report and no `FATAL` line in the log: a
+`SIGBUS` on an ordinary watched heap page (read-only, its neighbours read-write) written by lifted code. Had the fault
+handler declined that fault, the crash hook would have logged it, so the handler was not in place. The likely path is
+the decline path, which copied `linux.c`: for a fault in code outside the executable it set the default action and
+returned. If the access then succeeded (a page another thread had just made accessible), the default action stayed set
+for the whole process, and the next write-watch fault on any thread ended the game silently. The handler now retries a
+fault whose page allows the access by the time it checks (`mach_vm_region`), up to 1,000 times at one address, and
+otherwise logs a `platform: unhandled ... fault` line (address, error code, page state, watched, written bit, and the
+library) and ends the process through the crash hook wherever the code is. This cause is inferred, not reproduced; the
+new line will tell if it happens again.
+
 ## Lessons carried over from the earlier ports
 
 These cost days there. Check them here before looking elsewhere:
