@@ -51,10 +51,10 @@ void vk_caps_driver(VkPhysicalDevice p) {
 
 // TOTK_GPL=0 turns graphics pipeline libraries off; they are on wherever the driver has fast linking. AMD's RDNA 1/2
 // driver branch had them off for a while: its device losses at boot (issue #5) came with a cold pipeline cache, but
-// their cause was GPU writes past 3D BC images (vk_exec.c, "3D BC render targets"). With that fixed, the RDNA 1/2
-// driver boots with GPL from a cold cache and fast-links without a failure, while with GPL off every new pipeline is
-// built whole on the draw's path (frames of 0.5-1.2 s on an RX 6600, issue #381). Savage Wind Recomp turns GPL off on
-// RDNA 4 under RADV for a GPU hang at the title screen.
+// their cause was GPU writes past 3D BC images (vk_exec.c, "3D render targets drawn through stand-ins"). With that
+// fixed, the RDNA 1/2 driver boots with GPL from a cold cache and fast-links without a failure, while with GPL off
+// every new pipeline is built whole on the draw's path (frames of 0.5-1.2 s on an RX 6600, issue #381). Savage Wind
+// Recomp turns GPL off on RDNA 4 under RADV for a GPU hang at the title screen.
 int vk_caps_gpl(const VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT *f,
                 const VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT *p) {
     gpl_lib = f->graphicsPipelineLibrary;
