@@ -430,6 +430,12 @@ static int create_device(void) {
                       : "unavailable (no VK_EXT_device_address_binding_report)");
     g_vk.has_buffer_device_address = c->f12.bufferDeviceAddress;
     g_vk.has_astc_ldr = h->textureCompressionASTC_LDR;
+#ifdef __APPLE__
+    // MoltenVK makes 2D_ARRAY_COMPATIBLE 3D images only in Metal placement heaps, which it leaves off on AMD GPUs
+    // (MoltenVK, MVKDevice.mm: "AMD support for MTLHeap is buggy"); vkCreateImage then fails with FEATURE_NOT_PRESENT.
+    g_vk.no_2d_on_3d = c->port.sType && !c->port.imageView2DOn3DImage;
+    if (g_vk.no_2d_on_3d) rt_log("vk: no 2D views of 3D images: draws into 3D textures go through 2D array stand-ins");
+#endif
     {
         const char *e = cfg_get("TOTK_FEEDBACK");
         int layout_ok = has_fbl && has_lr && c->fbl.attachmentFeedbackLoopLayout && c->lr.dynamicRenderingLocalRead;

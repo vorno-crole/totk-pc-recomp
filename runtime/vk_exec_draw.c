@@ -783,7 +783,7 @@ VkImageView vk_exec_target_view(const VkTexImage *img, VkFormat format, VkImageV
 }
 
 void vk_exec_image_gone(VkImage image) {
-    vk_exec_bc_gone(image);
+    vk_exec_vol_gone(image);
     vk_hdr_image_gone(image);
     if (!views_by_image.klen) return;
     for (ViewNode *n = nvn_hm_del(&views_by_image, &image), *next; n; n = next) {

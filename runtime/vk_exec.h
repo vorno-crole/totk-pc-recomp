@@ -205,8 +205,8 @@ int vk_exec_draw_writes(const VkExec *s, int dispatch, uint64_t (*out)[2], int m
 // vk_exec_draw.c: the vertex and fragment shader of the last draw recorded into this command buffer (NULL: none yet).
 void vk_exec_draw_shaders(const VkExec *ex, const GfxShader **vs, const GfxShader **fs);
 VkBuffer vk_exec_inline_buffer(VkDeviceSize size);
-// vk_exec.c: the stand-in a 3D BC render target is drawn through goes with its image (vk_exec_image_gone).
-void vk_exec_bc_gone(VkImage image);
+// vk_exec.c: the stand-ins a 3D render target is drawn through go with its image (vk_exec_image_gone).
+void vk_exec_vol_gone(VkImage image);
 // vk_hdr.c: with TOTK_HDR=1, notes a draw into a presented window texture (vk_hdr_track: set by the first present).
 extern int vk_hdr_track;
 void vk_hdr_draw(VkExec *ex, const VkPipeInfo *info);
