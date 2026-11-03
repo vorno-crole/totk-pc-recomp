@@ -365,5 +365,12 @@ The game builds and plays on this machine: title screen, saves, and the opening 
 | 4. Boot | title screen | done |
 | 5. Play | a stable 60 fps in the open world | started: the opening cave runs |
 
+Open crash, seen once on 2026-11-03, after about 4 minutes of play: lifted code (`f_7000a2ea20`, guest `main+0xa2ea20`,
+called from `main+0xa2e908`) wrote to `0x1f662`. The store is `entry->ptr[min(i, entry->count)]` through a table of
+16-byte `{count, pointer}` entries, so the entry held a garbage pointer: game data was wrong, not the address
+arithmetic. It came a second after the frame limit was changed from 90 to 60 in the overlay menu, with the menu open
+and a movie decoder just configured. Whether it is macOS-specific (a guest write lost or overwritten) or a game bug
+under that timing is not known yet.
+
 The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
 `spirv_fixup` for `Coherent`.
