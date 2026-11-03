@@ -852,20 +852,56 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
 static int (*fault_hook)(uint64_t addr);
 static void (*crash_fn)(const PlatCrash *c);
 
+// 1 when the page at addr now allows the access: another thread changed its protection between the fault and this
+// check (a commit, a thaw), and the access may simply run again.
+static int access_ok_now(uint64_t addr, int write) {
+    mach_vm_address_t a = addr & ~(PG - 1);
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    if (mach_vm_region(mach_task_self(), &a, &size, VM_REGION_BASIC_INFO_64, (vm_region_info_t)&info, &count, &object) !=
+        KERN_SUCCESS || a > addr)
+        return 0;
+    return (info.protection & (write ? VM_PROT_WRITE : VM_PROT_READ)) != 0;
+}
+
+// Retries of the same address in a row: an access that keeps faulting on a page that allows it ends as a crash.
+static volatile uint64_t retry_at;
+static volatile int32_t retry_n;
+
 static void fault_handler(int sig, siginfo_t *si, void *uc) {
     ucontext_t *u = uc;
     uint32_t err = u->uc_mcontext->__es.__err;
     int mem = sig == SIGSEGV || sig == SIGBUS;
     uint64_t at = (uint64_t)(uintptr_t)si->si_addr;
     if (mem && (err & 2) && (ww_fault(at) || (fault_hook && fault_hook(at)))) return;
+    if (mem && access_ok_now(at, err & 2)) {
+        if (__atomic_exchange_n(&retry_at, at, __ATOMIC_RELAXED) != at) __atomic_store_n(&retry_n, 0, __ATOMIC_RELAXED);
+        if (__atomic_add_fetch(&retry_n, 1, __ATOMIC_RELAXED) < 1000) return;
+    }
+    // A fault nobody handles ends the process here, whichever code it is in. Returning with the default action set
+    // instead would leave it set for the whole process when the access then succeeds (a page another thread made
+    // accessible in between), and the next write-watch fault on any thread would end the game without a word.
     uintptr_t rip = (uintptr_t)u->uc_mcontext->__ss.__rip;
     Dl_info info, self;
-    if (crash_fn && dladdr((void *)rip, &info) && dladdr((void *)plat_crash_hook, &self) && info.dli_fbase == self.dli_fbase) {
+    int ours = dladdr((void *)plat_crash_hook, &self);
+    if (mem) {
+        char line[512];
+        uint8_t st = at < PS_LIMIT && pstate ? pstate[at / PG] : 0xff;
+        int watched = ww_bits && at < PS_LIMIT && ww_watched(at);
+        int bit = watched ? (int)(ww_bits[at / PG >> 6] >> (at / PG & 63) & 1) : -1;
+        int k = snprintf(line, sizeof line, "platform: unhandled %s fault at %#llx (err %#x, page state %u, watched %d, "
+                         "written bit %d) by code in %s\n", sig == SIGBUS ? "SIGBUS" : "SIGSEGV", (unsigned long long)at,
+                         err, st, watched, bit, dladdr((void *)rip, &info) && info.dli_fname ? info.dli_fname : "?");
+        if (k > 0) write_all(2, line, (size_t)k < sizeof line ? (size_t)k : sizeof line - 1);
+    }
+    if (crash_fn && ours) {
         PlatCrash c = {sig == SIGSEGV ? "access violation" : sig == SIGBUS ? "bus error"
                        : sig == SIGILL ? "illegal instruction" : "arithmetic exception",
                        (uint32_t)sig, rip, rip - (uintptr_t)self.dli_fbase, -1, 0};
         if (mem) c.access = (err & 16) ? 8 : (err & 2) ? 1 : 0, c.addr = at;
-        crash_fn(&c);
+        crash_fn(&c);   // logs and exits
     }
     signal(sig, SIG_DFL);   // returns into the faulting instruction, which faults again with the default action
 }
