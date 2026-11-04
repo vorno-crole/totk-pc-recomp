@@ -9,6 +9,14 @@
 // every render pass and dispatch, and a ring of records says what each mark was. The design follows Savage Wind
 // Recomp's GPU checkpoints (refs/SavageWindRecomp runtime/nvn/vulkan/exec.c ck_mark and vk_checkpoints_report: a mark
 // per pass and dispatch, numbers in a ring of 4096, text only at the device loss); the code is ours.
+//
+// Without VK_AMD_buffer_marker (MoltenVK has neither it nor the NVIDIA checkpoints), TOTK_PASS_CRUMBS=1 writes the same
+// codes with vkCmdFillBuffer. A fill is a transfer command, valid only outside a render pass, which holds for every
+// crumb and mark: they sit at the start and end of command buffers and between a pass's barrier and its
+// vkCmdBeginRendering or after its vkCmdEndRendering. A fill has no pipeline stage of its own, so a crumb writes only
+// word 0, the newest point the GPU reached, and word 1 stays 0; a pass mark's start and end fills still go to words 2
+// and 3. On Metal each fill is a small encoder of its own between the render encoders, which is why it is off by
+// default.
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +26,7 @@
 #include "vk.h"
 
 static PFN_vkCmdWriteBufferMarkerAMD write_marker;
+static int fill;                   // no AMD marker: crumbs and pass marks by vkCmdFillBuffer (TOTK_PASS_CRUMBS=1)
 static VkBuffer buf;
 static VmaAllocation alloc;
 static volatile uint32_t *words;   // 0, 1: crumbs; 2, 3: pass marks
@@ -29,38 +38,46 @@ static PFN_vkCmdSetCheckpointNV set_checkpoint;
 static void pass_marks_init(VkCtx *c);
 
 static void buffer_init(VkCtx *c) {
-    write_marker = (PFN_vkCmdWriteBufferMarkerAMD)vkGetDeviceProcAddr(c->device, "vkCmdWriteBufferMarkerAMD");
+    write_marker = c->has_buffer_marker
+                       ? (PFN_vkCmdWriteBufferMarkerAMD)vkGetDeviceProcAddr(c->device, "vkCmdWriteBufferMarkerAMD")
+                       : NULL;
+    fill = !write_marker;
     VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = 16,
                              .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT};
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_HOST,
                                   .flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT | VMA_ALLOCATION_CREATE_MAPPED_BIT,
                                   .requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT};
     VmaAllocationInfo info;
-    if (!write_marker || vmaCreateBuffer(c->vma, &bi, &ai, &buf, &alloc, &info) != VK_SUCCESS) {
+    if (vmaCreateBuffer(c->vma, &bi, &ai, &buf, &alloc, &info) != VK_SUCCESS) {
         rt_log("vk: GPU breadcrumbs unavailable");
-        write_marker = NULL;
+        write_marker = NULL, fill = 0;
         return;
     }
     words = info.pMappedData;
     words[0] = words[1] = words[2] = words[3] = 0;
-    rt_log("vk: GPU breadcrumbs on (VK_AMD_buffer_marker)");
+    rt_log("vk: GPU breadcrumbs on (%s)", fill ? "vkCmdFillBuffer, TOTK_PASS_CRUMBS=1" : "VK_AMD_buffer_marker");
 }
 
 void vk_crumbs_init(VkCtx *c) {
-    if (c->has_buffer_marker) buffer_init(c);
+    const char *e = cfg_get("TOTK_PASS_CRUMBS");
+    if (c->has_buffer_marker || (e && *e && strcmp(e, "0") != 0)) buffer_init(c);
     pass_marks_init(c);
 }
 
 void vk_crumbs_release(void) {
     VkCtx *c = vk_ctx();
     if (buf && c) vmaDestroyBuffer(c->vma, buf, alloc);
-    buf = VK_NULL_HANDLE, alloc = NULL, words = NULL, write_marker = NULL;
+    buf = VK_NULL_HANDLE, alloc = NULL, words = NULL, write_marker = NULL, fill = 0;
     vk_pass_marks_on = pm_amd = 0, set_checkpoint = NULL;
 }
 
 void vk_crumb(VkCommandBuffer cb, int kind, uint64_t n) {
-    if (!write_marker || !cb) return;
+    if (!words || !cb) return;
     uint32_t code = (uint32_t)kind << 28 | (uint32_t)(n & 0x0fffffff);
+    if (fill) {
+        vkCmdFillBuffer(cb, buf, 0, 4, code);
+        return;
+    }
     write_marker(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf, 0, code);
     write_marker(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, buf, 4, code);
 }
@@ -81,7 +98,10 @@ void vk_crumbs_report(void) {
     char reached[96], finished[96];
     describe(words[0], reached, sizeof reached);
     describe(words[1], finished, sizeof finished);
-    rt_log("vk: GPU breadcrumbs: the GPU last reached %s; everything before %s had finished", reached, finished);
+    if (fill)
+        rt_log("vk: GPU breadcrumbs (vkCmdFillBuffer): the GPU last reached %s", reached);
+    else
+        rt_log("vk: GPU breadcrumbs: the GPU last reached %s; everything before %s had finished", reached, finished);
 }
 
 // ---- pass marks
@@ -93,7 +113,8 @@ void vk_crumbs_report(void) {
 static VkPassMark ring[VK_PASS_MARKS];
 static uint32_t seq;                        // marks made (atomic: the recording threads of a chunked replay)
 
-// TOTK_PASS_CRUMBS: unset, buffer marks where VK_AMD_buffer_marker exists; 1, also NVIDIA checkpoints; 0, neither.
+// TOTK_PASS_CRUMBS: unset, buffer marks where VK_AMD_buffer_marker exists; 1, also NVIDIA checkpoints, and fills where
+// there is no AMD marker; 0, none.
 int vk_pass_marks_want_nv(void) {
     const char *e = cfg_get("TOTK_PASS_CRUMBS");
     return e && *e && strcmp(e, "0") != 0;
@@ -104,19 +125,23 @@ static void pass_marks_init(VkCtx *c) {
     int off = e && !strcmp(e, "0");
     set_checkpoint = c->has_nv_checkpoints
                          ? (PFN_vkCmdSetCheckpointNV)vkGetDeviceProcAddr(c->device, "vkCmdSetCheckpointNV") : NULL;
-    pm_amd = !off && write_marker && words;
+    pm_amd = !off && words;   // words exist only with the AMD marker, or with fills when TOTK_PASS_CRUMBS asks for them
     vk_pass_marks_on = pm_amd || set_checkpoint;
     if (vk_pass_marks_on)
-        rt_log("vk: pass marks on (%s%s%s; TOTK_PASS_CRUMBS=0 turns them off%s)", pm_amd ? "VK_AMD_buffer_marker" : "",
+        rt_log("vk: pass marks on (%s%s%s; TOTK_PASS_CRUMBS=0 turns them off%s)",
+               pm_amd ? (fill ? "vkCmdFillBuffer" : "VK_AMD_buffer_marker") : "",
                pm_amd && set_checkpoint ? " and " : "", set_checkpoint ? "VK_NV_device_diagnostic_checkpoints" : "",
                set_checkpoint ? "" : ", =1 adds NVIDIA checkpoints where the driver has them");
     else
         rt_log("vk: pass marks off (%s)", off ? "TOTK_PASS_CRUMBS=0"
-                                              : "no VK_AMD_buffer_marker; TOTK_PASS_CRUMBS=1 asks for NVIDIA checkpoints");
+                                              : "no VK_AMD_buffer_marker; TOTK_PASS_CRUMBS=1 asks for buffer fills "
+                                                "and NVIDIA checkpoints");
 }
 
 void vk_pass_mark_cmd(VkCommandBuffer cb, uint32_t id, int end) {
-    if (pm_amd)
+    if (pm_amd && fill)
+        vkCmdFillBuffer(cb, buf, end ? 12 : 8, 4, id);
+    else if (pm_amd)
         write_marker(cb, end ? VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, buf,
                      end ? 12 : 8, id);
     if (set_checkpoint) set_checkpoint(cb, (const void *)(uintptr_t)((uint64_t)id << 1 | (end != 0)));
@@ -258,7 +283,7 @@ void vk_pass_marks_report(void) {
     uint32_t started, finished;
     char t[2048];
     if (vk_pass_marks_read(&started, &finished)) {
-        vk_pass_marks_format("VK_AMD_buffer_marker", started, finished, t, sizeof t);
+        vk_pass_marks_format(fill ? "vkCmdFillBuffer" : "VK_AMD_buffer_marker", started, finished, t, sizeof t);
         log_lines(t);
     }
     nv_report();

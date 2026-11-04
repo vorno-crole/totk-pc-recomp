@@ -390,8 +390,8 @@ static uint8_t *draw_prefix(uint8_t *q, prog_t *prog, const pool_t *pool, tex_t 
 // ---- pass marks part (vk_crumbs.c): one submission with a pass of 2 draws into the draw part's target, a dispatch and
 // a pass of 3 draws into a second target. Once its fence is done, the buffer marks must name the last pass as both
 // started and finished, the ring records must hold what the three were, and vk_pass_marks_format (the text
-// vk_device_fault_report logs) must name it. Without VK_AMD_buffer_marker or with TOTK_PASS_CRUMBS=0 it is skipped:
-// NVIDIA's checkpoints can only be read once the device is lost.
+// vk_device_fault_report logs) must name it. Without VK_AMD_buffer_marker it needs TOTK_PASS_CRUMBS=1 (buffer fills);
+// with TOTK_PASS_CRUMBS=0 it is skipped: NVIDIA's checkpoints can only be read once the device is lost.
 static char marks_text[2048];
 static int marks_skipped;
 
@@ -1037,7 +1037,8 @@ int probe_vkexec(void) {
     else
         printf("probe-vkexec: mirror part skipped (memory mode import)\n");
     if (marks_skipped)
-        printf("probe-vkexec: pass marks part skipped (no VK_AMD_buffer_marker, or TOTK_PASS_CRUMBS=0)\n");
+        printf("probe-vkexec: pass marks part skipped (no VK_AMD_buffer_marker and TOTK_PASS_CRUMBS unset, or "
+               "TOTK_PASS_CRUMBS=0)\n");
     else
         printf("probe-vkexec: pass marks part passed (pass, dispatch, pass in one submission: the GPU's last started and "
                "finished mark is the last pass, ring records exact); the report reads:\n%s\n", marks_text);
