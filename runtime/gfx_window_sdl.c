@@ -267,6 +267,36 @@ int gfx_window_vk_presentable(VkInstance inst, VkPhysicalDevice pd, uint32_t fam
 // ---- gfx_wsys.h
 static int open_ok;
 
+// TOTK_DISPLAY=n: the window opens centred on the n-th display SDL lists (1 is the first), and fullscreen covers that
+// display; unset or 0, the system picks (on macOS the display with the menu bar). The list goes to the log, so the
+// number can be read there.
+static SDL_DisplayID chosen_display;
+
+static void centre_on(SDL_DisplayID d) {
+    if (d) SDL_SetWindowPosition(g_win, SDL_WINDOWPOS_CENTERED_DISPLAY(d), SDL_WINDOWPOS_CENTERED_DISPLAY(d));
+}
+
+static void move_to_display(void) {
+    int n = 0;
+    SDL_DisplayID *ids = SDL_GetDisplays(&n);
+    if (!ids) return;
+    for (int i = 0; i < n; i++) {
+        const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(ids[i]);
+        const char *name = SDL_GetDisplayName(ids[i]);
+        rt_log("gfx: display %d: %s, %dx%d", i + 1, name ? name : "?", m ? m->w : 0, m ? m->h : 0);
+    }
+    const char *e = cfg_get("TOTK_DISPLAY");
+    int want = e && *e ? atoi(e) : 0;
+    if (want >= 1 && want <= n) {
+        chosen_display = ids[want - 1];
+        centre_on(chosen_display);
+        rt_log("gfx: the window opens on display %d (TOTK_DISPLAY)", want);
+    } else if (want) {
+        rt_log("gfx: TOTK_DISPLAY=%s: no such display (%d listed); the system's choice", e, n);
+    }
+    SDL_free(ids);
+}
+
 static void open_window(void *arg) {
     (void)arg;
     int w, h;
@@ -276,7 +306,9 @@ static void open_window(void *arg) {
         rt_log("gfx: SDL_CreateWindow failed (%s)", SDL_GetError());
         return;
     }
+    move_to_display();      // before the size: the scale is the target display's
     set_pixel_size(w, h);   // w x h were window units; the setting is in pixels
+    centre_on(chosen_display);   // the resize kept the top-left corner
     density_update();
     note_applied();
     refresh_rate_update();
