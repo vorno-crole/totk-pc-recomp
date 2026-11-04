@@ -2322,19 +2322,44 @@ static int vb_used_on(void) {
     if (on < 0) on = cfg_bool("TOTK_VB_USED");
     return on;
 }
+#ifdef __APPLE__
+// The streams that need an aligned copy (vk_valign_layout) under the bound attribute state, with their layouts. The
+// state changes far less often than draws, and asking vk_valign_layout for all 16 streams twice a draw cost 6% of the
+// replay thread on Great Sky Island, so the answer is kept until an attribute or a stride changes. One per recording
+// thread (chunked recording records a submission on several), kept across command buffers: it depends on the state alone.
+static _Thread_local struct {
+    uint32_t vattr[16], stride[16];
+    uint32_t need;   // bit b: stream b needs a copy, laid out as va[b]
+    VkValign va[16];
+    int valid;
+} VA;
+
+static uint32_t valign_streams(const VkExec *ex) {
+    uint32_t stride[16];
+    for (int b = 0; b < 16; b++) stride[b] = ex->pipe.vstream[b].stride;
+    if (VA.valid && !memcmp(VA.vattr, ex->pipe.vattr, sizeof VA.vattr) && !memcmp(VA.stride, stride, sizeof stride))
+        return VA.need;
+    memcpy(VA.vattr, ex->pipe.vattr, sizeof VA.vattr), memcpy(VA.stride, stride, sizeof stride);
+    VA.need = 0;
+    for (int b = 0; b < 16; b++)
+        if (vk_valign_layout(VA.vattr, b, stride[b], &VA.va[b])) VA.need |= 1u << b;
+    VA.valid = 1;
+    return VA.need;
+}
+#endif
 
 #ifdef __APPLE__
 // A stream whose layout Metal cannot read (vk_valign.c) binds an aligned copy of its range, with the copy's stride.
 // 1 when the stream needs one (nb is the zero buffer when its range does not resolve); 0 leaves the outputs alone.
-static int valign_bind(const VkExec *ex, int b, const NVNbufferRange *r, VkBuffer *nb, VkDeviceSize *nsz,
+static int valign_bind(const VkExec *ex, uint32_t need, int b, const NVNbufferRange *r, VkBuffer *nb, VkDeviceSize *nsz,
                        VkDeviceSize *nstr) {
-    VkValign va;
-    if (b >= 16 || !vk_valign_layout(ex->pipe.vattr, b, (uint32_t)*nstr, &va)) return 0;
-    *nstr = va.stride;
+    if (b >= 16 || !(need >> b & 1)) return 0;
+    const VkValign *va = &VA.va[b];
+    *nstr = va->stride;
     VkMemSpan sp;
     if (r->address && vk_mem_resolve(r->address, 1, &sp)) {
         uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
-        if (!vk_valign_buffer(r->address, n, &va, nb, nsz)) *nb = Z.zbuf, *nsz = ZERO_BYTES;
+        if (!vk_valign_buffer(r->address, n, va, nb, nsz)) *nb = Z.zbuf, *nsz = ZERO_BYTES;
     }
     return 1;
 }
@@ -2350,6 +2375,9 @@ static void bind_vertex_buffers(VkExec *ex) {
     // A buffer left bound was bound earlier in this command buffer, so the deferred frees keep it alive until the
     // submission is done.
     uint32_t used = vb_used_on() && D->B.st_valid ? D->B.vmask : VK_PIPE_ALL_BINDINGS;
+#ifdef __APPLE__
+    uint32_t need = valign_streams(ex);
+#endif
     uint32_t chg = 0;
     if (!D->B.vb_valid) {   // the command buffer's first bind sets all 17 slots, the zero buffer where nothing resolves
         for (int b = 0; b < 17; b++)
@@ -2373,7 +2401,7 @@ static void bind_vertex_buffers(VkExec *ex) {
             const NVNbufferRange *r = &ex->vbuf[b];
             int copied = 0;
 #ifdef __APPLE__
-            copied = valign_bind(ex, b, r, &nb, &nsz, &nstr);
+            copied = valign_bind(ex, need, b, r, &nb, &nsz, &nstr);
 #endif
             if (copied) {   // another stream's copy: the next draw must not take it for the stream's own
                 D->B.vres &= ~(1u << b);
