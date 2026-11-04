@@ -3,7 +3,7 @@
 **TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native x86-64 application for Windows and Linux ([docs/architecture.md](docs/architecture.md)).
 
 > [!NOTE]
-> **This is a fork that adds an Intel Mac port** to [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp). The work is on the branch [`macos-intel`](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel). On the one Mac it has been tried on, the game reaches its title screen and plays its opening cave at about 60 fps; nothing past the cave has been tested. There is no installer and no packaged app: you build it from source with your own game files. [macOS status](#macos-intel) has the details.
+> **This is a fork that adds an Intel Mac port** to [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp). The work is on the branch [`macos-intel`](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel). On the one Mac it has been tried on, the game reaches its title screen and plays its opening cave at about 60 fps, and runs at 27 to 42 fps standing on Great Sky Island from a save; nothing further has been tested. There is no installer and no packaged app: you build it from source with your own game files. [macOS status](#macos-intel) has the details.
 >
 > Report Mac problems to this fork, not upstream. The Windows and Linux sections below describe upstream's work; those builds have not been rerun with this branch's changes.
 
@@ -24,9 +24,9 @@ Experimental, and tested on one machine: an i7-9700K with an AMD Radeon RX 6600 
 
 | | |
 |---|---|
-| Works | build from source, title screen at 60 fps, loading a save, the opening cave at about 60 fps |
-| Known problems | 3D render targets fail, so some effects may be wrong; ASTC textures decode on the CPU, because Metal's compiler for AMD GPUs fails on the GPU decoder; timed waits run slow, which may affect pacing; no custom border colours, LOD bias or last-vertex flat shading in Metal |
-| Not tested | anything past the opening cave, long sessions, other Macs and GPUs, preparing shaders ahead of play (expect stutter while shaders compile) |
+| Works | build from source, title screen at 60 fps, loading a save, the opening cave at about 60 fps; standing on Great Sky Island at 27 to 42 fps depending on the view |
+| Known problems | audio frames are signalled to the game in bursts, which may make reverb click; no custom border colours, LOD bias or last-vertex flat shading in Metal |
+| Not tested | walking past the start of Great Sky Island, long sessions, other Macs and GPUs, preparing shaders ahead of play (expect stutter while shaders compile) |
 | Not available | Apple silicon, an installer, an `.app` |
 
 The findings, measurements and work left are in [docs/macos.md](docs/macos.md).

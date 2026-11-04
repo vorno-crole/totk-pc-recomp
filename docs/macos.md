@@ -43,7 +43,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `shaderInt64`, `shaderStorageImageWriteWithoutFormat`, BC textures, anisotropy, independent blend | yes | |
 | `geometryShader` | **no** | required by `vk_device.c` `create_device`, but no stage uses it: pipelines are vertex and fragment only, so the check is dropped on macOS |
 | `shaderFloat64` | no | existing softfloat64 path (`vk_caps.c`) |
-| ASTC | no | the compute decoder does not compile here, see [ASTC](#the-astc-compute-decoder-does-not-compile), so the CPU decoder runs |
+| ASTC | no | the compute decoder runs, after a change for Metal's compiler, see [ASTC](#the-astc-compute-decoder-and-the-metal-compiler) |
 | Graphics pipeline library | no | existing whole-pipeline path, the default on AMD RDNA 1/2 on Windows |
 | Subgroup size 32 | yes, fixed at 32 | the pin works |
 | `minStorageBufferOffsetAlignment` 4 | 16 | existing rounding path (`vk_caps.c`) |
@@ -59,7 +59,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `VK_EXT_robustness2` | extension listed, all three features false | `nullDescriptor` is not used by the runtime |
 | `VK_EXT_conditional_rendering`, `VK_EXT_transform_feedback` | no | only buffer usage flags depend on them |
 | `VK_EXT_device_fault`, `VK_AMD_buffer_marker` | no | a lost device gives no report |
-| `imageView2DOn3DImage` (portability) | no | 3D render targets fail, see [First boot](#first-boot) |
+| `imageView2DOn3DImage` (portability) | no | draws into 3D images go through 2D array stand-ins, see [What else the first runs showed](#what-else-the-first-runs-showed) |
 | `minVertexInputBindingStrideAlignment` (portability) | 4 | `vk_valign.c` copies streams that break it, see [Vertex streams](#vertex-streams) |
 | `triangleFans` (portability) | true but slow | MoltenVK emulates fans with compute passes, see below |
 | `maxMemoryAllocationSize`, `maxBufferSize` | 3.5 GiB | one pool or buffer above it fails |
@@ -125,9 +125,9 @@ fill. The whole 3.4 GiB application pool would be about 5 s of CPU spread over i
 written. A first version left committed pages writable and marked them written, which saved those faults, but it
 reported pages nobody wrote and `--probe-gfx-abi` rightly failed it.
 
-### The ASTC compute decoder does not compile
+### The ASTC compute decoder and the Metal compiler
 
-`vkCreateComputePipelines` fails for `astc_decode.comp`: `Compiler encountered an internal error`. It is the compiler for
+`vkCreateComputePipelines` failed for `astc_decode.comp`: `Compiler encountered an internal error`. It is the compiler for
 AMD GPUs, reproduced outside the game with `newLibraryWithSource` and `newComputePipelineStateWithFunction` on the MSL
 that `MVK_CONFIG_DEBUG=1` printed. What did not help:
 
@@ -137,12 +137,26 @@ that `MVK_CONFIG_DEBUG=1` printed. What did not help:
 | `MTLLibraryOptimizationLevelSize` | fails after about 30 s |
 | Workgroup arrays made thread-local | fails, so workgroup memory is not the trigger |
 | Group barriers removed | fails after 140 s |
+| Another decoder of the same lineage: Weeping of the Empire's `engine/runtime/nvn/vulkan/astc_decode.comp` (MIT), one invocation per block, no workgroup memory, no barriers | fails the same way |
 
-The MSL has no `coherent`, so this is not Dragon's Crown's bug. The size of the shader (2,361 lines of MSL, everything
-inlined) and the long failures suggest a limit in the compiler rather than one bad construct, but that is not proven.
-The runtime falls back by itself to the CPU decoder, which is correct and tested (`--probe-vkmem`, 186,758 blocks) but
-slow for a game with this many ASTC textures. `--probe-astc` fails here for this reason. The next things to try are
-splitting the shader into smaller functions Metal does not inline, or transcoding ASTC to BC at install time.
+The size of the shader suggested a compiler limit; it was one expression. Building variants of the shader as compute
+pipelines through MoltenVK 1.4.2, each with one part replaced by a stub, narrowed it down. The pipeline builds when both
+integer-sequence decodes (`ise_at`) are stubbed and fails with either one. Inside it, it builds without the trit
+decode, and the quint decode is innocent. Inside `trit_at` it is the last branch of the low-trit decode,
+`(C & 1u) & ~(C >> 1) & 1u`: written `(C & 1u) & ((C >> 1) ^ 1u) & 1u`, the same bit, the pipeline builds. Both
+`~` uses in `trit_at` are now written that way. The other decoder has the same trit decode, which is why it failed too.
+
+With that change the shipped SPIR-V (`glslc -O`, `runtime/astc_decode_spv.h`) builds in 0.5 s, and `--probe-astc`
+passes: 1,740,602 texels of 14 footprints, linear and sRGB, bit-exact with the CPU decoder. A 2048x2048 4x4 texture
+decodes in 7.7 ms of batch time against 18.6 ms on the CPU worker pool. In two scripted runs from the save, standing
+still on Great Sky Island, the steady frame rate is the same with either decoder (25.7-27.4 fps GPU, 25.4-29.8 CPU):
+nothing streams in. The difference is at loading: with the CPU decoder the worst frames of the first minute were
+1,055, 991 and 344 ms, two of them with 389 and 151 ms of ASTC decode; with the GPU decoder 445, 299 and 107 ms, with
+under 1 ms of ASTC each, and 7 frames over 100 ms against 11. The gain while moving through the world, where textures
+stream, has not been measured.
+
+`TOTK_ASTC=cpu` still selects the CPU decoder. BC3 re-encoding after the decode (`TOTK_ASTC_BC`) stays off by itself on
+this 8 GB card.
 
 ### Thread interruption
 
@@ -263,14 +277,13 @@ These cost days there. Check them here before looking elsewhere:
 
 In the order they are likely to matter:
 
-1. ASTC on the CPU, above. It may be the first thing that limits play.
-2. Frame rate through MoltenVK. Nothing has been measured with this game's draw counts.
-3. Shader compile time. MoltenVK converts SPIR-V to MSL and Metal compiles it, there is no graphics pipeline library, and
+1. Frame rate through MoltenVK: 27 to 42 fps on Great Sky Island so far, see [Frame rate](#frame-rate).
+2. Shader compile time. MoltenVK converts SPIR-V to MSL and Metal compiles it, there is no graphics pipeline library, and
    the extended-dynamic-state gaps add pipeline variants. The list holds 29,587 variants for 1.4.3.
-4. Shaders SPIRV-Cross or Metal refuses, like the ASTC decoder. Every shader can be tested offline: run the census
+3. Shaders SPIRV-Cross or Metal refuses, like the ASTC decoder. Every shader can be tested offline: run the census
    output through the conversion and a Metal compile before booting the game.
-5. The visible risks in the table above.
-6. Write fault cost, above.
+4. The visible risks in the table above.
+5. Write fault cost, above.
 
 ## Game files
 
@@ -337,8 +350,8 @@ Two wrong turns to avoid repeating: a smooth depth buffer does not prove the geo
 checking only the UV stream's alignment missed the skinning streams. Compare with a reference early. Forcing 16x anisotropy
 changed nothing, and the texture data was correct throughout.
 
-The title is still darker and less orange than the reference, which may be the camera's position or the failed 3D images
-below.
+The title was still darker and less orange than the reference. The 3D render targets below were failing then, the sky's
+volume among them; the title has not been compared with the reference again since they were fixed.
 
 ### Sampler limit
 
@@ -356,8 +369,6 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
 
 ### What else the first runs showed
 
-
-
 - **3D render targets failed.** Four kinds of 3D image (`vk_texture.c`, `2D_ARRAY_COMPATIBLE`) failed with `MTLHeap must be
   enabled to create 2D-on-3D or block texel view compatible images`, retried every frame. They include the sky's 256x32x16
   scattering volume, R8 volumes of the sizes of the BC4 volumes drawn at the logo, and the grading LUT of the menu's background blur; without
@@ -366,8 +377,16 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
   images are now made without the flag when the portability subset reports no `imageView2DOn3DImage`, and draws into them
   go through 2D array stand-ins, as 3D BC targets already did ([table](#what-differs-from-linux)). A scripted run with the
   camera on the sky shows a blue sky and clouds where the build before showed green.
-- **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
-  affects every frame's pacing, and is the first thing to look at for the frame rate.
+- **Audio frame events come in bursts.** `--probe-ipc` expects the audio renderer's frame event every 5 ms (240 samples
+  at 48 kHz) and measures 12.2 and 13.7 ms in two runs, worst gap 25-26 ms; its SDK loop measures 18-19 ms. The
+  renderer itself keeps time (554 frames rendered over 547 periods), so frames are rendered but signalled together.
+  The built-in output pulls 1024-sample periods, about 4.3 frames each. `audren.c` `render_thread` then renders frames
+  back to back, and the waiting thread wakes once per burst. This is the PipeWire case: on Linux, device-paced frames
+  stay 4/5 of a frame apart (`gap_ns`), because without the gap AUX effects read stale return samples and click at frame
+  seams. The gap is `#ifdef __linux__`, so macOS has none. Timed waits are not the cause: the stress test waits
+  20.03 ms for 20 ms. An earlier note here read the probe as timed waits overshooting, which was wrong. Not fixed yet;
+  the next step is to set the gap on macOS too, or ask SDL for a smaller device period, then check the probe and a
+  `TOTK_AUDIO_DUMP` where the game uses reverb.
 
 ## Frame rate
 
@@ -406,9 +425,17 @@ at is the fence wait: what the game waits for each frame, and whether the chain 
 All three together, with no environment set: 26.9 and 27.4 fps, the replay 10-11 ms a frame, against 22.9 and 24.7
 before, about 15% more.
 
+Profile-guided optimisation does not help yet. An instrumented build (`-fprofile-instr-generate` on the generated code
+and the runtime; `LLVM_PROFILE_FILE` with `%c`, continuous mode, because `plat_exit` skips the exit handlers that
+would write the profile) trained on the same scripted run, and the build with `-fprofile-instr-use` gave 32.3-33.6
+fps in two runs, against 32.7-33.5 for the normal build in two runs interleaved with them. The replay was 7.5-7.6 ms a
+frame in both. The game's threads wait for GPU fences for about 21 ms of each 30 ms frame, so the CPU side is not
+what limits this scene, and a faster CPU side cannot show. Single runs drift by up to 5 fps between sessions (26 to 33
+fps for one build on the same day), so compare builds only in runs interleaved in one session.
+
 ## Status
 
-The game builds and plays on this machine: title screen, saves, and the opening cave ([First boot](#first-boot)). Beyond the cave is untested.
+The game builds and plays on this machine: title screen, saves, the opening cave ([First boot](#first-boot)), and standing still on Great Sky Island in scripted runs. Walking further has not been tested.
 
 On v0.3.7 the replay runs on its own thread by default. A scripted run on Great Sky Island with it on and off: 42.5 and
 41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either; the default stays. The new translator changes every
@@ -432,15 +459,15 @@ display with the menu bar. A display above 60 Hz paces a 60 fps limit unevenly: 
 | `--probe-cfg`, `--probe-gfx-abi` (55 checks, write watch included), `--probe-vkdevice`, `--probe-nvn-tex` | pass |
 | `--probe-vkmem` (41 GPU checks through imports, 0 validation errors) | passes |
 | `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |
-| `--probe-astc` | fails: the compiler bug above |
-| `--probe-ipc` | fails on the timing above; the third failure line is a deliberate fatal check |
+| `--probe-astc` | passes, since the change to `trit_at` ([ASTC](#the-astc-compute-decoder-and-the-metal-compiler)) |
+| `--probe-ipc` | 3 failures: the frame event period, frames rendered against elapsed, and the SDK render loop, all from the audio bursts in [What else the first runs showed](#what-else-the-first-runs-showed). The `lm` fatal it prints is a deliberate check and passes |
 | `--probe-vkexec`, `--probe-shader` | need the shader census, not run |
 | Windows and Linux builds | not rebuilt: there is no such machine here. The shared edits are behind `__APPLE__` or expand to the same text, but they need a build on each |
 
 | Phase | Done when | State |
 |---|---|---|
 | 0. Assessment | requirements checked against this GPU, memory and fault costs measured | done |
-| 1. Runtime builds | the runtime links and the game-free probes run | done, apart from the two open probes |
+| 1. Runtime builds | the runtime links and the game-free probes run | done, apart from `--probe-window` and `--probe-ipc` |
 | 2. Tools | `tools/extract.py`, hactool, translator on macOS | done |
 | 3. Shader census | every variant converts and compiles for Metal | not started |
 | 4. Boot | title screen | done |
@@ -458,5 +485,24 @@ register across `rt_call`, the guest fiber's whole run, and a fiber that came ba
 fibers with the first thread's state. `PLAT_TLS_VAR` (`platform.h`) looks the address up at every use on macOS, for
 `tcur` and `ipc.c`'s `t_req`; the other thread-locals are not used across a fiber switch.
 
-The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)). Before boot, these are known work: draw triangle fans as lists, and check
-`spirv_fixup` for `Coherent`.
+The base game, a 1.4.3 update and keys are verified, the merged RomFS included ([Game files](#game-files)).
+
+### Work left
+
+In the order it is likely to pay off:
+
+1. **Audio pacing.** Give macOS the frame gap Linux has, or a smaller device period, until `--probe-ipc` passes
+   ([What else the first runs showed](#what-else-the-first-runs-showed)).
+2. **Play past the cave.** Long sessions since the preemption fix, the surface and other sky islands, with
+   `TOTK_TRACE=perf`. These runs give the first figures for texture streaming and written pages a frame in the world.
+3. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
+   `TOTK_ASTC=cpu`.
+4. **The fence wait.** The game's main thread waits for GPU fences for 47% of its time while nothing is saturated
+   ([Frame rate](#frame-rate)). Find what it waits for each frame and whether the chain can overlap with the next one.
+5. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
+   `tools/prepare_shaders.py` build pipelines at install time.
+6. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
+7. **Profile-guided optimisation** again once the fence wait is gone and the CPU side limits the frame
+   ([Frame rate](#frame-rate)).
+8. If a trace or compile failure points there: triangle fans as lists (`vk_exec_draw.c` `op_draw`), `Coherent` in
+   `vk_pipeline.c` `spirv_fixup`, the title colour against the reference, `--probe-window`'s +1/255.

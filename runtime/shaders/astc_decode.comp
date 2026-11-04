@@ -66,14 +66,16 @@ int trit_at(uint T, int k) {
         if (((T >> 5) & 3u) == 3u) { t4 = 2; t3 = int((T >> 7) & 1u); }
         else { t4 = int((T >> 7) & 1u); t3 = int((T >> 5) & 3u); }
     }
+    // The inverted bit is (x ^ 1) & 1, not ~x & 1: Apple's Metal compiler for AMD GPUs (macOS 15.4, RX 6600 XT) fails
+    // with an internal error on the ~ form in the last branch below, and the same bit either way.
     if ((C & 3u) == 3u) {
         t2 = 2; t1 = int((C >> 4) & 1u);
-        t0 = int(((C >> 3) & 1u) << 1 | (((C >> 2) & 1u) & ~(C >> 3) & 1u));
+        t0 = int(((C >> 3) & 1u) << 1 | (((C >> 2) & 1u) & ((C >> 3) ^ 1u) & 1u));
     } else if (((C >> 2) & 3u) == 3u) {
         t2 = 2; t1 = 2; t0 = int(C & 3u);
     } else {
         t2 = int((C >> 4) & 1u); t1 = int((C >> 2) & 3u);
-        t0 = int(((C >> 1) & 1u) << 1 | ((C & 1u) & ~(C >> 1) & 1u));
+        t0 = int(((C >> 1) & 1u) << 1 | ((C & 1u) & ((C >> 1) ^ 1u) & 1u));
     }
     return k == 0 ? t0 : k == 1 ? t1 : k == 2 ? t2 : k == 3 ? t3 : t4;
 }
