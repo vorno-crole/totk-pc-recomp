@@ -152,6 +152,9 @@
 # here. Changes while the game runs take effect at once.
 # window_size = 1920x1080
 # fullscreen = 0
+# macOS and Linux: the display the window opens on, and fullscreen covers: 1 is the first in the log's "gfx: display"
+# lines. Unset or 0, the system picks (on macOS the display with the menu bar). Read at start.
+# display = 2
 # 1, the default: the game keeps running while you are in another window; the keyboard stays quiet until the window is
 # in front again. 0: it pauses when its window loses focus, as it does on the Switch when Home is pressed; a load
 # interrupted that way can stop for good. Read at each focus change.

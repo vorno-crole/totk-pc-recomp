@@ -174,8 +174,11 @@ a scripted run, so the port was not kept.
 `tests/plat_stress_macos.c` runs the platform file without game files. Three runs passed: 1,200,000 contended lock
 increments with readers alongside, a timed wait of 20.03 ms for 20 ms, 1,000 fiber switches, and the interruption numbers
 above. In its write-watch part three threads write random pages while the main thread syncs a copy every 2 ms: about
-500,000 pages over 800 rounds in 3 s, and 0 words differ at the end. Its last part reads a 4 MiB file into watched
-memory while the main thread resets the watch (see the `EFAULT` note under "What differs from Linux").
+500,000 pages over 800 rounds in 3 s, and 0 words differ at the end. Then it reads a 4 MiB file into watched
+memory while the main thread resets the watch (see the `EFAULT` note under "What differs from Linux"). Its last part
+writes one page before each of 20 resets, then stops: the page is reported 20 times, then 48 times without a write
+(`hot_keep`, [Frame rate](#frame-rate)), and not again until the next write. With `TOTK_WW_HOT=0` it is reported 0
+times without a write.
 
 ### Address space
 
@@ -201,7 +204,8 @@ assembler, so `kernel.c`'s stubs needed their own branch.
 | Locks | futex | `os_sync_wait_on_address` (public since macOS 14.4) on the same 32-bit words, so the lock logic is unchanged |
 | Faults | `SIGSEGV`, `gregs[REG_RIP]` | `SIGBUS` as well, `uc_mcontext->__ss.__rip`. A watched reservation installs the handler itself |
 | Interrupting a thread | signal handshake | `thread_suspend`, `thread_get_state`, `thread_set_state`, as on Windows. A signal handshake stopped only 551 of 2,000 tries inside its 200 us window here |
-| Write watch | userfaultfd | page bitmap, `mprotect`, fault handler |
+| Write watch | userfaultfd | page bitmap, `mprotect`, fault handler; a page written between every two resets stays writable and is reported at each ([Frame rate](#frame-rate)) |
+| Queue submits | the driver's | MoltenVK encodes on its own queue thread (`MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS=0`, set by `vk_device.c` `moltenvk_settings`) |
 | Reserving | `MAP_FIXED_NOREPLACE` | `mach_vm_allocate` with `VM_FLAGS_FIXED`, which fails on taken addresses |
 | Reading memory safely | `process_vm_readv` | `mach_vm_read_overwrite` |
 | Affinity | `sched_setaffinity` | none on macOS: the calls report failure |
@@ -365,6 +369,43 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
 - **Timing.** `--probe-ipc` measures a frame event period of 17.5 ms for 16.67 ms: timed waits overshoot on macOS. This one
   affects every frame's pacing, and is the first thing to look at for the frame rate.
 
+## Frame rate
+
+Measured with a muted scripted run that continues the save and stands still on Great Sky Island, looking over a wide
+view (`TOTK_TRACE=perf`, frames 3,000 to 6,300; the scene moves with the in-game clock, so runs vary by about 1 fps).
+Before the changes below: 22.9 and 24.7 fps in two runs, the replay thread busy 22-25 ms a frame.
+
+`sample` showed the replay thread busy 73% of the time and the game's main thread waiting for GPU fences for half of
+its time, so the replay held the frame back. Half of the replay's time was MoltenVK encoding Metal commands inside
+`vkQueueSubmit2`: MoltenVK does that on the calling thread unless `MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS` is 0.
+Every part of a split submission (`vk_exec.c` `maybe_split`, about 8 a frame here) was encoded before the replay went
+on. `vk_device.c` `moltenvk_settings` now sets it to 0 before the driver loads, unless the environment has a value:
+the replay fell to 12 ms a frame, and the frame rate rose to 25.7 and 26.5 fps.
+
+After that nothing was saturated. The replay thread was idle 63% of the time, MoltenVK's encoding thread busy 53%, and
+the GPU's `GPU Activity(%)` 40-60%, while the game's main thread still waited for fences for 47% of its time. Each frame
+is a chain: the game records, the replay turns that into Vulkan, MoltenVK encodes it, the GPU runs it, and the game
+waits for that fence before it goes on. The frame rate now depends on the length of the chain more than on any one part
+of it. Submitting smaller parts did not help: parts of 300 us and 32 draws (17 a frame) gave 26.0 fps, and no splitting
+at all 18.3 fps, so the defaults stay.
+
+The write watch was a cost on that chain: about 940 pages a frame were found written and protected again, and each
+faults on its next write, 6-14 us of a game thread. 71% of the pages a reset reported had been reported 30-60 ms
+before, the previous frame. `macos.c` `hot_keep` now leaves a page that was reported at 4 resets in a row, no more than
+100 ms apart, writable with its bit set, so it is reported at every reset without faulting, and protects it again every
+64 reports to find out whether it went quiet. A report too many costs the consumer a copy of the page. Two runs each:
+27.4 and 27.3 fps against 26.5 and 26.8 with `TOTK_WW_HOT=0`. The replay's write-watch queries fell from 1.05 to
+0.1-0.17 ms a frame, and screenshots show the same scene.
+
+The per-draw check of the vertex layouts for Metal's 4-byte alignment (`vk_exec_draw.c` `valign_streams`) is now kept
+until the attribute state changes. It cost 6% of the replay thread; its effect on the frame rate is inside the noise.
+
+`TOTK_ONE_PER_CORE` has nothing to act on here: the i7-9700K has no SMT, and macOS has no affinity calls. Next to look
+at is the fence wait: what the game waits for each frame, and whether the chain can overlap with the next frame.
+
+All three together, with no environment set: 26.9 and 27.4 fps, the replay 10-11 ms a frame, against 22.9 and 24.7
+before, about 15% more.
+
 ## Status
 
 The game builds and plays on this machine: title screen, saves, and the opening cave ([First boot](#first-boot)). Beyond the cave is untested.
@@ -373,6 +414,12 @@ On v0.3.7 the replay runs on its own thread by default. A scripted run on Great 
 41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either; the default stays. The new translator changes every
 shader key, so the first start after the update rebuilds all 2,668 pipelines before the window opens (132 s here); the
 next start took 1.5 s.
+
+On a heavier view of the island the frame rate is 27 fps after the changes in [Frame rate](#frame-rate), 23-25 before.
+
+`display = n` in `[display]` (`TOTK_DISPLAY`, `gfx_window_sdl.c` `move_to_display`) opens the window on the n-th display
+of the log's `gfx: display` lines, and fullscreen then covers that display; without it macOS opens the window on the
+display with the menu bar. A display above 60 Hz paces a 60 fps limit unevenly: set it to 60 Hz ("Pacing" above).
 
 | Check | Result |
 |---|---|
