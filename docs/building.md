@@ -244,6 +244,10 @@ its ICD beside `totk`, which points the Vulkan loader there. Saves go to `build/
 
 `tools/prepare_shaders.py` has not been run on macOS, so shaders compile during play.
 
+After editing a shader in `runtime/shaders/`, `brew install shaderc` gives the `glslc` that `tools/build_shaders.py`
+needs. It rewrites every header; keep only the ones whose source changed, since another `glslc` version changes the
+words of the others.
+
 ## Checks
 
 Before a commit:
