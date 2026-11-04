@@ -387,6 +387,15 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
   20.03 ms for 20 ms. An earlier note here read the probe as timed waits overshooting, which was wrong. Not fixed yet;
   the next step is to set the gap on macOS too, or ask SDL for a smaller device period, then check the probe and a
   `TOTK_AUDIO_DUMP` where the game uses reverb.
+- **One GPU hang, not reproduced.** About 20 minutes into a session, as Link received Fuse, the GPU stopped making
+  progress; after 5 s the kernel restarted it (`IOAccelEventMachine2` in `log show`) and the game ended with
+  `VK_ERROR_DEVICE_LOST`. A full-screen pass had waited 1.3 s for its pipeline just before. None of the shaders
+  translated in that second has a loop, and the ASTC decoder had not logged work for some time. Replays of the same save
+  did not hang. MoltenVK has neither `VK_AMD_buffer_marker` nor the NVIDIA checkpoints, so the breadcrumbs that name
+  the hung pass were off; `TOTK_PASS_CRUMBS=1` now writes them with `vkCmdFillBuffer` (`vk_crumbs.c`). Each fill is
+  a Metal encoder of its own, which cost about a third of the frame rate in play, so it stays off unless asked for. If
+  the hang comes back, replay with it on; if it then stops hanging, a mark per submission alone is the cheaper next
+  step.
 
 ## Frame rate
 
