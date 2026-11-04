@@ -3,7 +3,8 @@
 // docs/macos.md ("Thread interruption" and the fault handler's installation). Build it against the runtime's platform
 // objects and SDL3, the clipboard's only user:
 //   clang -std=gnu11 -O2 -march=x86-64-v3 -mmacosx-version-min=14.4 -Iruntime -I/usr/local/include tests/plat_stress_macos.c \
-//       <macos.c.o> <common.c.o> -L/usr/local/lib -lSDL3 -fuse-ld=lld -o plat_stress
+//       <macos.c.o> <common.c.o> -L/usr/local/lib -lSDL3 -framework IOKit -framework CoreFoundation -fuse-ld=lld \
+//       -o plat_stress
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -206,6 +207,23 @@ int main(void) {
     plat_file_close(pr_file);
     plat_file_delete(path);
     free(src);
+    // A page written before every reset stays writable and is reported at every reset (macos.c hot_keep); once the
+    // writes stop it is reported for at most HOT_RECHECK (64) more resets, and then only after a write again.
+    volatile uint32_t *hot = (volatile uint32_t *)(uintptr_t)(BASE + N - 4096);
+    plat_mem_written(BASE, N, pg, N / 4096, 1);
+    int seen = 0, quiet = 0;
+    for (int i = 0; i < 20; i++) {
+        *hot = (uint32_t)i;
+        seen += plat_mem_written((uintptr_t)hot, 4096, pg, 1, 1) == 1;
+    }
+    while (quiet < 200 && plat_mem_written((uintptr_t)hot, 4096, pg, 1, 1) == 1)
+        quiet++;
+    CK(seen == 20);
+    CK(quiet <= 64);
+    CK(plat_mem_written((uintptr_t)hot, 4096, pg, 1, 1) == 0);
+    *hot = 99;
+    CK(plat_mem_written((uintptr_t)hot, 4096, pg, 1, 1) == 1 && *hot == 99);
+    printf("hot page: 20 writes reported %d times, then %d reports without a write\n", seen, quiet);
     printf("%s\n", fails ? "FAILED" : "all passed");
     return fails != 0;
 }

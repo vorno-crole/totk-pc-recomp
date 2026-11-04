@@ -671,7 +671,8 @@ int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name,
 //   - bit clear: the page is really read-only, so the next write faults and sets the bit.
 // A commit, and a change back to read-write (plat_mem_protect, a thawed region), leave the page really read-only with
 // its bit clear, so only real writes are reported, as on Windows and Linux. The price is one fault for the first write
-// of each page, on top of the zero fill. A decommit clears the bits.
+// of each page, on top of the zero fill. A decommit clears the bits. A page written between every two resets stays
+// writable with its bit set (hot_keep), and so is reported at every reset.
 // ww_spin serialises the fault path with a reset, which clears a bit and protects its page; without it a fault that had
 // set its bit could make the page writable just after the reset protected it, and that page's writes would be lost. The
 // fault path takes it in a signal handler, so nothing may fault or wait while holding it.
@@ -681,6 +682,7 @@ int plat_file_list(const char *dir, const char *ext, int (*cb)(const char *name,
 enum { PS_FREE, PS_RESERVED, PS_NONE, PS_READ, PS_RW };   // PS_NONE.. are committed: PLAT_PROT_* + PS_NONE
 static uint8_t *pstate;
 static volatile uint64_t *ww_bits;
+static uint32_t *ww_hot;   // per page, for hot_keep; NULL: off
 static struct { uint64_t lo, hi; } ww_ranges[8];
 static volatile int32_t ww_nranges;
 static volatile int32_t ww_spin;
@@ -748,6 +750,11 @@ int plat_mem_reserve(uint64_t addr, uint64_t n, int watch) {
         fault_install();
         void *p = mmap(NULL, PS_LIMIT / PG / 8, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
         if (p != MAP_FAILED) __atomic_store_n(&ww_bits, (volatile uint64_t *)p, __ATOMIC_RELEASE);
+        const char *hot = getenv("TOTK_WW_HOT");
+        if (!hot || strcmp(hot, "0")) {
+            p = mmap(NULL, PS_LIMIT / PG * 4, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+            if (p != MAP_FAILED) ww_hot = p;
+        }
     }
     int ok = 0;
     if (pstate && addr + n <= PS_LIMIT) {
@@ -821,11 +828,32 @@ int plat_mem_state(uint64_t addr, uint64_t limit, uint64_t *end) {
     return v == PS_FREE ? PLAT_MEM_FREE : v == PS_RESERVED ? PLAT_MEM_RESERVED : v - PS_NONE;
 }
 
+// Pages written between every two resets. On Great Sky Island 70% of the pages a reset reported had been reported one
+// frame before (the game's streamed constants and vertices), and each cost a fault a frame, 6-14 us of a guest thread:
+// several milliseconds a frame. A reset leaves such a page writable with its bit set, so it is reported at every reset
+// without faulting. A report too many costs the consumer a page of copying, far less than a fault. Every HOT_RECHECK
+// reports the page is protected once, so one that went quiet stops being reported within that many resets.
+// ww_hot per page: its last report's millisecond in the low 24 bits, the run of reports no more than HOT_GAP_MS apart
+// in the high 8. TOTK_WW_HOT=0 turns it off.
+#define HOT_GAP_MS 100   // a frame at 10 fps
+#define HOT_RUN 4        // reports in a row before a reset leaves the page writable
+#define HOT_RECHECK 64
+
+// ww_spin held. 1 when the reset should leave page p writable and its bit set.
+static int hot_keep(uint64_t p, uint32_t ms) {
+    uint32_t v = ww_hot[p], gap = (ms - v) & 0xffffff;
+    uint32_t run = v && gap < HOT_GAP_MS ? (v >> 24) + 1 : 1;
+    if (run >= HOT_RUN + HOT_RECHECK) run = HOT_RUN - 1;   // protected once: a write by the next reset makes it hot again
+    ww_hot[p] = run << 24 | (ms & 0xffffff);
+    return run >= HOT_RUN;
+}
+
 uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t max, int reset) {
     if (!max || !n) return 0;
     if (!ww_bits || !ww_watched(addr)) return UINT64_MAX;
     uint64_t got = 0, run = 0, run_end = 0;   // [run, run_end): pages to protect, joined to save system calls
     uint64_t p = addr / PG, end = (addr + n + PG - 1) / PG;
+    uint32_t ms = reset && ww_hot ? (uint32_t)(clock_gettime_nsec_np(CLOCK_UPTIME_RAW) / 1000000) : 0;
     ww_lock();
     while (p < end && got < max) {
         uint64_t w = __atomic_load_n(&ww_bits[p >> 6], __ATOMIC_RELAXED) >> (p & 63);
@@ -837,6 +865,10 @@ uint64_t plat_mem_written(uint64_t addr, uint64_t n, uint64_t *pages, uint64_t m
         if (p >= end) break;
         uint64_t a = p * PG;
         pages[got++] = a;
+        if (reset && ww_hot && pstate[p] == PS_RW && hot_keep(p, ms)) {
+            p++;
+            continue;
+        }
         if (reset) {
             __atomic_fetch_and(&ww_bits[p >> 6], ~(1ull << (p & 63)), __ATOMIC_RELAXED);
             if (pstate[p] == PS_RW) {

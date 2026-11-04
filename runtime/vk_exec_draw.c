@@ -2057,6 +2057,31 @@ static int vb_used_on(void) {
     if (on < 0) on = cfg_bool("TOTK_VB_USED");
     return on;
 }
+#ifdef __APPLE__
+// The streams that need an aligned copy (vk_valign_layout) under the bound attribute state, with their layouts. The
+// state changes far less often than draws, and asking vk_valign_layout for all 16 streams twice a draw cost 6% of the
+// replay thread on Great Sky Island, so the answer is kept until an attribute or a stride changes. Replay thread only,
+// like B, but kept across command buffers: it depends on the state alone.
+static struct {
+    uint32_t vattr[16], stride[16];
+    uint32_t need;   // bit b: stream b needs a copy, laid out as va[b]
+    VkValign va[16];
+    int valid;
+} VA;
+
+static uint32_t valign_streams(const VkExec *ex) {
+    uint32_t stride[16];
+    for (int b = 0; b < 16; b++) stride[b] = ex->pipe.vstream[b].stride;
+    if (VA.valid && !memcmp(VA.vattr, ex->pipe.vattr, sizeof VA.vattr) && !memcmp(VA.stride, stride, sizeof stride))
+        return VA.need;
+    memcpy(VA.vattr, ex->pipe.vattr, sizeof VA.vattr), memcpy(VA.stride, stride, sizeof stride);
+    VA.need = 0;
+    for (int b = 0; b < 16; b++)
+        if (vk_valign_layout(VA.vattr, b, stride[b], &VA.va[b])) VA.need |= 1u << b;
+    VA.valid = 1;
+    return VA.need;
+}
+#endif
 
 static void bind_vertex_buffers(VkExec *ex) {
     VkBuffer vb[17];
@@ -2068,6 +2093,9 @@ static void bind_vertex_buffers(VkExec *ex) {
     // bound and a draw reads a few. The others get the zero buffer, never a stale one: a buffer bound but not read must
     // still be a live handle.
     uint32_t used = vb_used_on() && B.st_valid ? B.vmask : VK_PIPE_ALL_BINDINGS;
+#ifdef __APPLE__
+    uint32_t need = valign_streams(ex);
+#endif
     // A stream whose range is the one its bound buffer was resolved from, with no pool or mirror change since
     // (vk_mem_gen, read before any resolve), resolves to that buffer again: most draws change one stream or none.
     uint64_t gen = vk_mem_gen();
@@ -2079,13 +2107,13 @@ static void bind_vertex_buffers(VkExec *ex) {
         res |= 1u << b;
         const NVNbufferRange *r = &ex->vbuf[b];
 #ifdef __APPLE__
-        VkValign va;
-        if (vk_valign_layout(ex->pipe.vattr, b, (uint32_t)vstr[b], &va)) {   // another stream's copy: never the shortcut
+        if (b < 16 && need >> b & 1) {   // another stream's copy: never the shortcut
+            const VkValign *va = &VA.va[b];
             VkMemSpan sp;
-            vstr[b] = va.stride;
+            vstr[b] = va->stride;
             if (!r->address || !vk_mem_resolve(r->address, 1, &sp)) continue;
             uint64_t n = r->size && r->size < sp.avail ? r->size : sp.avail;
-            if (vk_valign_buffer(r->address, n, &va, &vb[b], &vsz[b])) continue;
+            if (vk_valign_buffer(r->address, n, va, &vb[b], &vsz[b])) continue;
             vb[b] = Z.zbuf, vsz[b] = ZERO_BYTES;
             continue;
         }
@@ -2103,10 +2131,8 @@ static void bind_vertex_buffers(VkExec *ex) {
     memcpy(B.vcls, vcls, sizeof vcls), memcpy(B.vpool, vpool, sizeof vpool);
     memcpy(B.vin, ex->vbuf, sizeof B.vin);
 #ifdef __APPLE__
-    for (int b = 0; b < 16; b++) {   // a copy sits in B.vb: the next draw's shortcut must not take it for the stream's own
-        VkValign va;
-        if (vk_valign_layout(ex->pipe.vattr, b, ex->pipe.vstream[b].stride, &va)) B.vin[b].address = 0, B.vin[b].size = UINT32_MAX;
-    }
+    for (int b = 0; b < 16; b++)   // a copy sits in B.vb: the next draw's shortcut must not take it for the stream's own
+        if (need >> b & 1) B.vin[b].address = 0, B.vin[b].size = UINT32_MAX;
 #endif
     B.vgen = gen, B.vres = res;
     if (B.vb_valid && !memcmp(B.vb, vb, sizeof vb) && !memcmp(B.vo, vo, sizeof vo) && !memcmp(B.vsz, vsz, sizeof vsz) &&

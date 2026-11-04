@@ -81,12 +81,24 @@ static void moltenvk_beside_exe(void) {
     strcpy(cut + 1, "MoltenVK_icd.json");
     if (plat_file_exists(path)) plat_setenv("VK_DRIVER_FILES", path);
 }
+
+// MoltenVK encodes a submission's Metal commands inside vkQueueSubmit, on the calling thread, unless told otherwise.
+// That was half of the replay thread's time on Great Sky Island, and the frame waited for it. Encoding on MoltenVK's own
+// queue thread lets the replay record the next part of the frame meanwhile: replay 25 to 12 ms a frame, 23-25 to
+// 26 fps there (docs/macos.md, "Frame rate"). MoltenVK reads its settings when the driver loads, so this runs before
+// the first Vulkan call; a value of the user's own wins.
+static void moltenvk_settings(void) {
+    const char *name = "MVK_CONFIG_SYNCHRONOUS_QUEUE_SUBMITS";
+    char v[8];
+    if (!plat_getenv(name, v, sizeof v)) plat_setenv(name, "0");
+}
 #endif
 
 static int create_instance(void) {
     mesa_cache_beside_exe();
 #ifdef __APPLE__
     moltenvk_beside_exe();
+    moltenvk_settings();
 #endif
     const char *ext[12];
     uint32_t n_ext = (uint32_t)gfx_window_vk_extensions(ext, 7);
