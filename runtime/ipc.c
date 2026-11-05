@@ -332,6 +332,10 @@ int ipc_svc(Cpu *c, uint32_t imm) {
 // use: sm: -> audren:u -> GetWorkBufferSize -> an audio renderer with the null mixer, whose frame event the probe
 // times while it sends RequestUpdate every frame. A child process checks the unknown-service fatal.
 #define PROBE_FRAMES 200
+// Frames the render tick runs before it is timed. After Start the renderer fills the output ring up to its target once
+// (audio_mixer.c audio_mixer_pace_ns), up to 8.5 frames ahead of the clock with 1024-sample device periods; frames
+// spaced by audren.c render_thread's gap take a few hundred ms to do that. The checks are about the steady state.
+#define PROBE_WARMUP 100
 #define PROBE_CHILD_ENV "TOTK_PROBE_IPC_CHILD"
 #define PROBE_UNKNOWN_SERVICE "lm"
 #define H_CURRENT_PROCESS 0xFFFF8001u
@@ -580,13 +584,18 @@ static void probe_renderer(Cpu *c, uint32_t audren) {
     sv(c, 0x17, ev, 0, 0, 0);
     uint64_t t0 = 0, t1 = 0, f0 = 0, f1 = 0, worst = 0, prev = 0;
     int waits_ok = 0, updates_ok = 0;
-    for (int i = 0; i < PROBE_FRAMES; i++) {
+    for (int j = 0; j < PROBE_WARMUP + PROBE_FRAMES; j++) {
+        int i = j - PROBE_WARMUP;   // timed from 0
         uint32_t w = sv(c, 0x18, 0, (uint64_t)(uintptr_t)hs, 1, 1000000000ull);
         uint64_t now = kern_now_ns();
-        waits_ok += w == 0;
         sv(c, 0x17, ev, 0, 0, 0);
         uint64_t f = 0;
+        waits_ok += w == 0;
         updates_ok += request_update(c, ren, &u, &f, &v0) == 0;
+        if (i < 0) {
+            prev = now;
+            continue;
+        }
         if (i == 0) t0 = now, f0 = f;
         if (i && now - prev > worst) worst = now - prev;
         prev = t1 = now;
@@ -594,10 +603,11 @@ static void probe_renderer(Cpu *c, uint32_t audren) {
     }
     double period = (double)(t1 - t0) / (PROBE_FRAMES - 1) / 1e6, expect = 1e3 * g_param.sample_count / g_param.sample_rate;
     double rendered = (double)(f1 - f0), elapsed = (double)(t1 - t0) / 1e6 / expect;
-    printf("render tick: %d waits on the frame event (%d ok), %d RequestUpdate (%d ok); mean period %.3f ms (expect "
-           "%.3f), worst gap %.3f ms; frames rendered %llu over %.1f periods\n", PROBE_FRAMES, waits_ok, PROBE_FRAMES,
-           updates_ok, period, expect, (double)worst / 1e6, (unsigned long long)(f1 - f0), elapsed);
-    CHECK(waits_ok == PROBE_FRAMES && updates_ok == PROBE_FRAMES, "event waits / updates");
+    const int n_all = PROBE_WARMUP + PROBE_FRAMES;
+    printf("render tick: %d waits on the frame event (%d ok), %d RequestUpdate (%d ok); timed after %d: mean period "
+           "%.3f ms (expect %.3f), worst gap %.3f ms; frames rendered %llu over %.1f periods\n", n_all, waits_ok, n_all,
+           updates_ok, PROBE_WARMUP, period, expect, (double)worst / 1e6, (unsigned long long)(f1 - f0), elapsed);
+    CHECK(waits_ok == n_all && updates_ok == n_all, "event waits / updates");
     CHECK(period > expect * 0.9 && period < expect * 1.1, "frame event period %.3f ms", period);
     CHECK(rendered > elapsed - 3 && rendered < elapsed + 3, "frames rendered %.0f vs elapsed %.1f", rendered, elapsed);
     printf("voice 0 (PCM16, 4800 samples): played %llu, wave buffers consumed %u\n",

@@ -377,16 +377,22 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
   images are now made without the flag when the portability subset reports no `imageView2DOn3DImage`, and draws into them
   go through 2D array stand-ins, as 3D BC targets already did ([table](#what-differs-from-linux)). A scripted run with the
   camera on the sky shows a blue sky and clouds where the build before showed green.
-- **Audio frame events come in bursts.** `--probe-ipc` expects the audio renderer's frame event every 5 ms (240 samples
-  at 48 kHz) and measures 12.2 and 13.7 ms in two runs, worst gap 25-26 ms; its SDK loop measures 18-19 ms. The
-  renderer itself keeps time (554 frames rendered over 547 periods), so frames are rendered but signalled together.
-  The built-in output pulls 1024-sample periods, about 4.3 frames each. `audren.c` `render_thread` then renders frames
-  back to back, and the waiting thread wakes once per burst. This is the PipeWire case: on Linux, device-paced frames
-  stay 4/5 of a frame apart (`gap_ns`), because without the gap AUX effects read stale return samples and click at frame
-  seams. The gap is `#ifdef __linux__`, so macOS has none. Timed waits are not the cause: the stress test waits
-  20.03 ms for 20 ms. An earlier note here read the probe as timed waits overshooting, which was wrong. Not fixed yet;
-  the next step is to set the gap on macOS too, or ask SDL for a smaller device period, then check the probe and a
-  `TOTK_AUDIO_DUMP` where the game uses reverb.
+- **Audio frame events came in bursts.** `--probe-ipc` expects the audio renderer's frame event every 5 ms (240
+  samples at 48 kHz) and measured 12.2-13.7 ms, worst gap 25-26 ms; its SDK loop measured 18-19 ms. The renderer kept
+  time (554 frames rendered over 547 periods), so frames were rendered but signalled together. The built-in output
+  pulls 1024-sample periods, about 4.3 frames each, and `audren.c` `render_thread` rendered them back to back; the
+  waiting thread woke once per burst. This is the PipeWire case: on Linux, device-paced frames stay 4/5 of a frame
+  apart (`gap_ns`), because without the gap AUX effects read stale return samples and click at frame seams. Timed waits
+  are not the cause: the stress test waits 20.03 ms for 20 ms.
+
+  A smaller device period does not help. With `SDL_AUDIO_DEVICE_SAMPLE_FRAMES` at 240, 256 or 480 SDL reports that
+  period, but the probe's thread still woke every 10.2-10.5 ms, two frames at a time. The gap does: with it on macOS as
+  well, the event comes every 5.01-5.02 ms and the SDK loop every 4.90-4.92 ms in three runs, and 150 s of the game's
+  title screen rendered 1,000 frames each 5 s with 0 underruns and 0-1 frames a window under 1 ms after the one before
+  (`TOTK_TRACE=audio`, `TOTK_AUDIO_DUMP`). The title screen was silent, so reverb seams in play are not checked yet.
+  The probe's check of frames rendered against time now starts after 100 warm-up frames: after Start the renderer fills
+  the output ring to its target once, 8.5 frames ahead with 1024-sample periods, and with the gap that fill falls
+  inside the timed second.
 - **One GPU hang, not reproduced.** About 20 minutes into a session, as Link received Fuse, the GPU stopped making
   progress; after 5 s the kernel restarted it (`IOAccelEventMachine2` in `log show`) and the game ended with
   `VK_ERROR_DEVICE_LOST`. A full-screen pass had waited 1.3 s for its pipeline just before. None of the shaders
@@ -472,14 +478,14 @@ display with the menu bar. A display above 60 Hz paces a 60 fps limit unevenly: 
 | `--probe-vkmem` (41 GPU checks through imports, 0 validation errors) | passes |
 | `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |
 | `--probe-astc` | passes, since the change to `trit_at` ([ASTC](#the-astc-compute-decoder-and-the-metal-compiler)) |
-| `--probe-ipc` | 3 failures: the frame event period, frames rendered against elapsed, and the SDK render loop, all from the audio bursts in [What else the first runs showed](#what-else-the-first-runs-showed). The `lm` fatal it prints is a deliberate check and passes |
+| `--probe-ipc` | passes, since the audio frame gap applies on macOS too ([What else the first runs showed](#what-else-the-first-runs-showed)). The `lm` fatal it prints is a deliberate check |
 | `--probe-vkexec`, `--probe-shader` | need the shader census, not run |
 | Windows and Linux builds | not rebuilt: there is no such machine here. The shared edits are behind `__APPLE__` or expand to the same text, but they need a build on each |
 
 | Phase | Done when | State |
 |---|---|---|
 | 0. Assessment | requirements checked against this GPU, memory and fault costs measured | done |
-| 1. Runtime builds | the runtime links and the game-free probes run | done, apart from `--probe-window` and `--probe-ipc` |
+| 1. Runtime builds | the runtime links and the game-free probes run | done, apart from `--probe-window` |
 | 2. Tools | `tools/extract.py`, hactool, translator on macOS | done |
 | 3. Shader census | every variant converts and compiles for Metal | not started |
 | 4. Boot | title screen | done |
@@ -503,18 +509,17 @@ The base game, a 1.4.3 update and keys are verified, the merged RomFS included (
 
 In the order it is likely to pay off:
 
-1. **Audio pacing.** Give macOS the frame gap Linux has, or a smaller device period, until `--probe-ipc` passes
-   ([What else the first runs showed](#what-else-the-first-runs-showed)).
-2. **Play past the cave.** Long sessions since the preemption fix, the surface and other sky islands, with
+1. **Play past the cave.** Long sessions since the preemption fix, the surface and other sky islands, with
    `TOTK_TRACE=perf`. These runs give the first figures for texture streaming and written pages a frame in the world.
-3. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
+   Include a `TOTK_AUDIO_DUMP` where the game uses reverb (a cave, a shrine) to check the frame seams.
+2. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
    `TOTK_ASTC=cpu`.
-4. **The fence wait.** The game's main thread waits for GPU fences for 47% of its time while nothing is saturated
+3. **The fence wait.** The game's main thread waits for GPU fences for 47% of its time while nothing is saturated
    ([Frame rate](#frame-rate)). Find what it waits for each frame and whether the chain can overlap with the next one.
-5. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
+4. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
    `tools/prepare_shaders.py` build pipelines at install time.
-6. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
-7. **Profile-guided optimisation** again once the fence wait is gone and the CPU side limits the frame
+5. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
+6. **Profile-guided optimisation** again once the fence wait is gone and the CPU side limits the frame
    ([Frame rate](#frame-rate)).
-8. If a trace or compile failure points there: triangle fans as lists (`vk_exec_draw.c` `op_draw`), `Coherent` in
+7. If a trace or compile failure points there: triangle fans as lists (`vk_exec_draw.c` `op_draw`), `Coherent` in
    `vk_pipeline.c` `spirv_fixup`, the title colour against the reference, `--probe-window`'s +1/255.

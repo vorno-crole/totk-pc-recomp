@@ -356,10 +356,11 @@ static void render_thread(void *p) {
     // and the frames would otherwise render back to back. On hardware the DSP renders one frame every 5 ms and
     // the game's audio thread works in between; AUX effects need that time to fill the return ring, or mix_aux
     // reads stale samples and the frame clicks at its seams. Device-paced frames stay at least 4/5 of a frame
-    // apart, which still refills a period well before the device drains it. Linux only: on Windows SDL pulls
-    // 480-sample periods, and a sink dump (TOTK_AUDIO_DUMP) of the bursts there showed no more seam spikes than
-    // chance, so a wait on this thread buys nothing.
-#ifdef __linux__
+    // apart, which still refills a period well before the device drains it. Linux and macOS: CoreAudio pulls
+    // 1024-sample periods too, and asking SDL for 240 or 480 (SDL_AUDIO_DEVICE_SAMPLE_FRAMES) still wakes the game's
+    // audio thread only every 10 ms, two frames at a time. Not Windows: SDL pulls 480-sample periods there, and a
+    // sink dump (TOTK_AUDIO_DUMP) of the bursts showed no more seam spikes than chance, so a wait buys nothing.
+#if defined(__linux__) || defined(__APPLE__)
     const uint64_t gap_ns = frame_ns * 4 / 5;
 #else
     const uint64_t gap_ns = 0;
