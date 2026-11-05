@@ -446,10 +446,13 @@ fps for one build on the same day), so compare builds only in runs interleaved i
 
 The game builds and plays on this machine: title screen, saves, the opening cave ([First boot](#first-boot)), and standing still on Great Sky Island in scripted runs. Walking further has not been tested.
 
-On v0.3.7 the replay runs on its own thread by default. A scripted run on Great Sky Island with it on and off: 42.5 and
-41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either; the default stays. The new translator changes every
-shader key, so the first start after the update rebuilds all 2,668 pipelines before the window opens (132 s here); the
-next start took 1.5 s.
+v0.3.7 ran the replay on its own thread by default. A scripted run on Great Sky Island with it on and off: 42.5 and
+41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either. v0.3.10 turned it off by default again for uneven
+motion at the 60 fps cap on a GTX 1660 Ti (#659); as on and off measured the same here, macOS follows that default, and
+the measurements in [Frame rate](#frame-rate) were taken with it on. A new translator changes every shader key, so the
+first start after an update that changes it rebuilds every pipeline before the window opens: 2,668 in 132 s on v0.3.7,
+3,678 in 410 s on v0.3.10; the next start took 1.5 s. On v0.3.10 the shader write merge (`wb_merge.comp`) runs in
+mirror mode, 4-6 dispatches a frame on the title screen, which holds 59 fps.
 
 On a heavier view of the island the frame rate is 27 fps after the changes in [Frame rate](#frame-rate), 23-25 before.
 
