@@ -25,7 +25,7 @@ Experimental, and tested on one machine: an i7-9700K with an AMD Radeon RX 6600 
 | | |
 |---|---|
 | Works | build from source, title screen at 60 fps, loading a save, the opening cave at about 60 fps; standing on Great Sky Island at 27 to 42 fps depending on the view |
-| Known problems | audio frames are signalled to the game in bursts, which may make reverb click; no custom border colours, LOD bias or last-vertex flat shading in Metal |
+| Known problems | no custom border colours, LOD bias or last-vertex flat shading in Metal |
 | Not tested | walking past the start of Great Sky Island, long sessions, other Macs and GPUs, preparing shaders ahead of play (expect stutter while shaders compile) |
 | Not available | Apple silicon, an installer, an `.app` |
 
