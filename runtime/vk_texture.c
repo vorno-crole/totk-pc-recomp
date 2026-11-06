@@ -843,6 +843,51 @@ static void expand_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n) {
     }
 }
 
+// The fields of a 16-bit packed Vulkan format, R G B A: shift from the least significant bit and width (0: no field,
+// alpha reads 1). Vulkan names the fields from the most significant bit.
+static int pack16_fields(VkFormat f, uint8_t sh[4], uint8_t bits[4]) {
+    static const struct { VkFormat f; uint8_t sh[4], bits[4]; } t[] = {
+        {VK_FORMAT_R4G4B4A4_UNORM_PACK16, {12, 8, 4, 0}, {4, 4, 4, 4}},
+        {VK_FORMAT_B4G4R4A4_UNORM_PACK16, {4, 8, 12, 0}, {4, 4, 4, 4}},
+        {VK_FORMAT_A4B4G4R4_UNORM_PACK16, {0, 4, 8, 12}, {4, 4, 4, 4}},
+        {VK_FORMAT_R5G6B5_UNORM_PACK16, {11, 5, 0, 0}, {5, 6, 5, 0}},
+        {VK_FORMAT_B5G6R5_UNORM_PACK16, {0, 5, 11, 0}, {5, 6, 5, 0}},
+        {VK_FORMAT_R5G5B5A1_UNORM_PACK16, {11, 6, 1, 0}, {5, 5, 5, 1}},
+        {VK_FORMAT_B5G5R5A1_UNORM_PACK16, {1, 6, 11, 0}, {5, 5, 5, 1}},
+        {VK_FORMAT_A1R5G5B5_UNORM_PACK16, {10, 5, 0, 15}, {5, 5, 5, 1}},
+    };
+    for (size_t i = 0; i < sizeof t / sizeof t[0]; i++)
+        if (t[i].f == f) { memcpy(sh, t[i].sh, 4), memcpy(bits, t[i].bits, 4); return 1; }
+    return 0;
+}
+
+// 16-bit packed texels (f: their Vulkan format) to RGBA8 UNORM, each field rounded as Vulkan converts UNORM (n texels).
+static void expand_pack16(VkFormat f, const uint8_t *src, uint8_t *dst, size_t n) {
+    uint8_t sh[4], bits[4];
+    if (!pack16_fields(f, sh, bits)) { memset(dst, 0, n * 4); return; }
+    for (size_t i = 0; i < n; i++, src += 2, dst += 4) {
+        uint32_t x = (uint32_t)src[0] | (uint32_t)src[1] << 8;
+        for (int c = 0; c < 4; c++) {
+            uint32_t m = (1u << bits[c]) - 1;
+            dst[c] = bits[c] ? (uint8_t)((((x >> sh[c]) & m) * 255 + m / 2) / m) : 255;
+        }
+    }
+}
+
+// RGBA8 texels back to the 16-bit packed format f (n texels): the read-back of expand_pack16.
+static void shrink_pack16(VkFormat f, const uint8_t *src, uint8_t *dst, size_t n) {
+    uint8_t sh[4], bits[4];
+    if (!pack16_fields(f, sh, bits)) { memset(dst, 0, n * 2); return; }
+    for (size_t i = 0; i < n; i++, src += 4, dst += 2) {
+        uint32_t x = 0;
+        for (int c = 0; c < 4; c++) {
+            uint32_t m = (1u << bits[c]) - 1;
+            if (bits[c]) x |= ((src[c] * m + 127) / 255) << sh[c];
+        }
+        dst[0] = (uint8_t)x, dst[1] = (uint8_t)(x >> 8);
+    }
+}
+
 static void shrink_rgb(int format, const uint8_t *src, uint8_t *dst, size_t n) {
     uint32_t e;
     texel_alpha_one(format, &e);
@@ -909,7 +954,7 @@ static void upload_cpu(Tex *e) {
     int bw, bh, bpb = nvn_fmt_bpb(d->format, &bw, &bh);
     int linear = nvn_tex_is_linear(d), is3d = d->target == NVN_TEXTURE_TARGET_3D, one_d = e->pub.type == VK_IMAGE_TYPE_1D;
     uint32_t levels = linear ? 1 : e->pub.levels, layers = linear ? 1 : e->pub.layers;
-    int astc = e->f.astc_bw != 0, rgb = e->f.expand_rgb;
+    int astc = e->f.astc_bw != 0, rgb = e->f.expand_rgb, p16 = e->f.pack16 != 0;
     int agpu = astc && vk_astc_gpu(), acheck = agpu && vk_astc_mode() == VK_ASTC_CHECK;   // raw blocks to the GPU
     uint32_t n = levels * layers, k = 0;
     VkBufferImageCopy *rg = calloc(n, sizeof *rg);
@@ -919,7 +964,7 @@ static void upload_cpu(Tex *e) {
         for (uint32_t ly = 0; ly < layers; ly++) {
             uint32_t w = mip(d->width, lv), h = one_d ? 1 : mip(d->height, lv), sl = is3d ? mip(d->depth, lv) : 1;
             uint64_t texels = (uint64_t)w * h * sl, raw = (uint64_t)(w + bw - 1) / bw * bpb * ((h + bh - 1) / bh) * sl;
-            uint64_t out = agpu ? raw : astc ? texels * 4 : rgb ? texels * (uint64_t)bpb / 3 * 4 : raw;
+            uint64_t out = agpu ? raw : astc || p16 ? texels * 4 : rgb ? texels * (uint64_t)bpb / 3 * 4 : raw;
             rg[k++] = (VkBufferImageCopy){.bufferOffset = total, .imageSubresource = {e->pub.aspect, lv, ly, 1},
                                           .imageExtent = {w, h, sl}};
             total += (out + 15) & ~15ull;
@@ -946,7 +991,7 @@ static void upload_cpu(Tex *e) {
             uint32_t rb = (w + bw - 1) / bw * (uint32_t)bpb, rows = (h + bh - 1) / bh;
             size_t raw = (size_t)rb * rows * sl;
             rg[k].bufferOffset -= base;
-            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb ? malloc(raw) : NULL;
+            uint8_t *dst = stg + rg[k].bufferOffset, *tmp = (astc && !agpu) || rgb || p16 ? malloc(raw) : NULL;
             if (nvn_deswizzle(d, lv, ly, t->mem, tmp ? tmp : dst, rb)) {
                 log_limited(&n_bad, "texture %#llx fmt %#x target %d: level %u layer %u has no CPU layout; uploaded as zeros",
                             (unsigned long long)e->pub.addr, d->format, d->target, lv, ly);
@@ -963,6 +1008,9 @@ static void upload_cpu(Tex *e) {
                 rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
             } else if (rgb) {
                 expand_rgb(d->format, tmp, dst, (size_t)w * h * sl);
+                rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
+            } else if (p16) {
+                expand_pack16(e->f.pack16, tmp, dst, (size_t)w * h * sl);
                 rg[k].bufferRowLength = w, rg[k].bufferImageHeight = h;
             } else {
                 rg[k].bufferRowLength = rb / (uint32_t)bpb * (uint32_t)bw, rg[k].bufferImageHeight = rows * (uint32_t)bh;
@@ -1285,6 +1333,7 @@ static int img_block(const Tex *e, int *bw, int *bh) {
     if (e->f.astc_bw) { *bw = *bh = 1; return 4; }
     int b = nvn_fmt_bpb(e->t.d.format, bw, bh);
     if (e->f.expand_rgb) { *bw = *bh = 1; return b / 3 * 4; }
+    if (e->f.pack16) { *bw = *bh = 1; return 4; }
     return e->f.vk == e->f.ideal ? b : 0;
 }
 
@@ -1879,7 +1928,7 @@ static int texels_read_record(Tex *e, const Region *g, const NVNcopyRegion *r, T
     if (g->level >= e->pub.levels) return 0;
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
     t->w = w;
-    t->ib = e->f.expand_rgb ? (size_t)g->bpb / 3 * 4 : 0;
+    t->ib = e->f.expand_rgb ? (size_t)g->bpb / 3 * 4 : e->f.pack16 ? 4 : 0;
     t->slice = t->ib ? (size_t)w * h * t->ib : g->wb * g->hb;
     t->stg = vk_staging(t->slice * (size_t)g->nz, &t->sb, &t->sa);
     VkBufferImageCopy *rg = calloc((size_t)g->nz, sizeof *rg);
@@ -1906,7 +1955,8 @@ static void texels_read_take(const Tex *e, const Region *g, const TexRead *t, ui
         const uint8_t *s = t->stg + t->slice * (size_t)z;
         uint8_t *m = mem + (size_t)z * g->img;
         for (size_t y = 0; y < g->hb; y++) {
-            if (t->ib) shrink_rgb(e->t.d.format, s + y * t->w * t->ib, m + y * g->row, t->w);
+            if (t->ib && e->f.pack16) shrink_pack16(e->f.pack16, s + y * t->w * t->ib, m + y * g->row, t->w);
+            else if (t->ib) shrink_rgb(e->t.d.format, s + y * t->w * t->ib, m + y * g->row, t->w);
             else memcpy(m + y * g->row, s + y * g->wb, g->wb);
         }
     }
@@ -1931,8 +1981,8 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
     }
     if (g->level >= e->pub.levels) return 0;
     uint32_t w = (uint32_t)r->width, h = (uint32_t)r->height;
-    int rgb = e->f.expand_rgb, astc = e->f.astc_bw != 0, agpu = astc && vk_astc_gpu();
-    size_t texels = (size_t)w * h, ib = agpu ? 0 : astc ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
+    int rgb = e->f.expand_rgb, p16 = e->f.pack16 != 0, astc = e->f.astc_bw != 0, agpu = astc && vk_astc_gpu();
+    size_t texels = (size_t)w * h, ib = agpu ? 0 : astc || p16 ? 4 : rgb ? (size_t)g->bpb / 3 * 4 : 0;
     size_t slice = ib ? texels * ib : g->wb * g->hb;   // agpu: the raw blocks, decoded by vk_astc_record
     VkBuffer sb;
     VmaAllocation sa;
@@ -1952,6 +2002,8 @@ static int image_texels(Tex *e, const Region *g, const NVNcopyRegion *r, uint8_t
             free(tight);
         } else if (rgb) {
             for (size_t y = 0; y < g->hb; y++) expand_rgb(e->t.d.format, m + y * g->row, s + y * w * ib, w);
+        } else if (p16) {
+            for (size_t y = 0; y < g->hb; y++) expand_pack16(e->f.pack16, m + y * g->row, s + y * w * ib, w);
         } else {
             for (size_t y = 0; y < g->hb; y++) memcpy(s + y * g->wb, m + y * g->row, g->wb);
         }

@@ -47,6 +47,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | Graphics pipeline library | no | existing whole-pipeline path, the default on AMD RDNA 1/2 on Windows |
 | Subgroup size 32 | yes, fixed at 32 | the pin works |
 | `minStorageBufferOffsetAlignment` 4 | 16 | existing rounding path (`vk_caps.c`) |
+| 16-bit packed formats (RGB565, RGB5A1, RGBA4) | **no**, not even the mandatory stand-ins: Metal has them on Apple GPUs only | stored as RGBA8, each texel expanded on upload, see [Fused-weapon icons](#fused-weapon-icons) |
 | `VK_EXT_attachment_feedback_loop_layout` | no | existing `VK_FEEDBACK_RESTART` path |
 | `VK_EXT_vertex_input_dynamic_state` | no | vertex input goes into the pipeline key |
 | `VK_EXT_extended_dynamic_state3` | only depth clamp, polygon mode and a few others | blend, write mask and alpha-to-coverage go into the pipeline key: more pipelines |
@@ -402,6 +403,23 @@ To reach a scene without a person: `TOTK_INPUT_SCRIPT` with lines such as `900 A
   a Metal encoder of its own, which cost about a third of the frame rate in play, so it stays off unless asked for. If
   the hang comes back, replay with it on; if it then stops hanging, a mark per submission alone is the cheaper next
   step.
+
+### Fused-weapon icons
+
+Fused weapons showed a dark square in the inventory where their icon belongs. The game captures each icon on the GPU
+and keeps it as a PNG in its cache storage (`build/profile-v143/cache/0/icon/Weapon_000.png` and so on, 144x144); the
+bad ones were a flat dark grey. The cause was a texture format: Metal on AMD and Intel GPUs has none of the 16-bit
+packed formats (RGB565, RGB5A1, RGBA4), and neither the exact Vulkan formats nor the mandatory stand-ins of
+`vk_formats.c` are there, so every log said `texture format 0x3b: VkFormat 8 lacks features 0xc001` (and `0x3c`) and the
+textures were never created; a shader sampling one read zeros. These formats also hold the terrain's normal and blend
+maps. Such a texture is now RGBA8 (`TexVkFormat.pack16`): each texel is expanded on upload as the table's Vulkan format
+defines its fields, the view swizzle stays the table's, and a read-back packs it again (`vk_texture.c`
+`expand_pack16`, `shrink_pack16`; all 65,536 values of each format survive the round trip). `--probe-vkmem` no longer
+lists the eight formats as unsupported, and weapons fused since show their icons.
+
+An icon captured while the bug was there stays in the cache, and the game shows it instead of capturing it again: an
+axe picked up on the first day stayed dark after the fix until its `Weapon_000.png` was removed, then the game captured
+it again correctly. The same holds for any later rendering fix: a bad cached icon goes when its file goes.
 
 ## Frame rate
 
