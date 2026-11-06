@@ -243,6 +243,42 @@ WEAK int vk_exec_record(VkCommandBuffer cb, const uint64_t *handles, int n, uint
     return 0;
 }
 
+// TOTK_TRACE=perf: how long the fence chain takes, logged every 5 s by the completion thread. Submit to signalled runs
+// from vkQueueSubmit2's return to the completion thread seeing the timeline reach the value (MoltenVK's encoding, the
+// GPU, the signal); signalled to done is the completion callbacks and vk_mem_collect that run before done advances and
+// the waiting threads wake (completion_main).
+#define CHAIN_RING 1024
+static uint64_t chain_submit_ns[CHAIN_RING];   // when value v was submitted, at v % CHAIN_RING; 0: not timed
+static uint64_t chain_log_ns, chain_n, chain_sig_ns, chain_sig_max, chain_done_n, chain_cb_ns, chain_collect_ns,
+    chain_done_ns, chain_done_max;
+
+static void chain_note_submit(uint64_t fence) {
+    if (rt_trace & RT_TRACE_PERF) __atomic_store_n(&chain_submit_ns[fence % CHAIN_RING], kern_now_ns(), __ATOMIC_RELEASE);
+}
+
+static void chain_note_reached(uint64_t from, uint64_t to, uint64_t now) {   // values (from, to] reached at now
+    for (uint64_t v = from + 1; v <= to; v++) {
+        uint64_t s = __atomic_exchange_n(&chain_submit_ns[v % CHAIN_RING], 0, __ATOMIC_ACQ_REL);
+        if (!s || s > now) continue;
+        chain_n++, chain_sig_ns += now - s;
+        if (now - s > chain_sig_max) chain_sig_max = now - s;
+    }
+}
+
+static void chain_log(uint64_t now) {
+    if (!chain_log_ns) chain_log_ns = now;
+    if (now - chain_log_ns < 5000000000ull) return;
+    double span = (now - chain_log_ns) / 1e9, nd = chain_done_n ? (double)chain_done_n : 1;
+    rt_log("perf: fence chain over %.1f s: %llu values; submit to signalled avg %.2f ms max %.2f; signalled to done "
+           "avg %.2f ms max %.2f (callbacks %.2f, vk_mem_collect %.2f) in %llu steps", span,
+           (unsigned long long)chain_n, chain_n ? chain_sig_ns / 1e6 / chain_n : 0.0, chain_sig_max / 1e6,
+           chain_done_ns / 1e6 / nd, chain_done_max / 1e6, chain_cb_ns / 1e6 / nd, chain_collect_ns / 1e6 / nd,
+           (unsigned long long)chain_done_n);
+    chain_log_ns = now;
+    chain_n = chain_sig_ns = chain_sig_max = chain_done_n = chain_cb_ns = chain_collect_ns = chain_done_ns =
+        chain_done_max = 0;
+}
+
 static void completion_main(void *arg) {
     VkCtx *c = arg;
     plat_mutex_lock(&st_lock);
@@ -265,6 +301,9 @@ static void completion_main(void *arg) {
             plat_mutex_lock(&st_lock);
             if (reached > issued) reached = issued;
         }
+        const int timed = (rt_trace & RT_TRACE_PERF) && reached > done;
+        uint64_t t_sig = timed ? kern_now_ns() : 0, t_cb = 0;
+        if (timed) chain_note_reached(done, reached, t_sig);
         while (qn && queue[qhead].fence <= reached) {
             Pending p = queue[qhead++];
             qn--;
@@ -272,12 +311,19 @@ static void completion_main(void *arg) {
             p.fn(p.arg);
             plat_mutex_lock(&st_lock);
         }
+        if (timed) t_cb = kern_now_ns();
         if (reached > done) {
             plat_mutex_unlock(&st_lock);
             vk_mem_collect();
             plat_mutex_lock(&st_lock);
             __atomic_store_n(&done, reached, __ATOMIC_RELEASE);
             plat_cond_broadcast(&cv_done);
+        }
+        if (timed) {
+            uint64_t t_done = kern_now_ns();
+            chain_done_n++, chain_cb_ns += t_cb - t_sig, chain_collect_ns += t_done - t_cb, chain_done_ns += t_done - t_sig;
+            if (t_done - t_sig > chain_done_max) chain_done_max = t_done - t_sig;
+            chain_log(t_done);
         }
     }
     plat_mutex_unlock(&st_lock);
@@ -434,6 +480,7 @@ uint64_t vk_sync_submit(const uint64_t *handles, int n) {
         rt_fatal("vk: vkQueueSubmit2 of value %llu failed (%d)", (unsigned long long)fence, (int)r);
     }
     s->fence = recorded ? fence : 0;
+    chain_note_submit(fence);
     vk_mem_note_submit(fence);
     plat_mutex_lock(&st_lock);
     __atomic_store_n(&issued, fence, __ATOMIC_RELEASE);

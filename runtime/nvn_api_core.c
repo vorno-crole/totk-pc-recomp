@@ -471,6 +471,34 @@ NVN_API(nvnQueueFenceSync) {
     s->fenced = 1;
     s->fence = nvn_fence_last();
 }
+// TOTK_TRACE=perf: the game's sync waits over 5 s, by how many submissions the waited value lies behind the newest
+// (0: the game waits for everything it has submitted). Counts of waits that blocked and their time, per bucket.
+static uint64_t sw_log_ns, sw_ready, sw_n[4], sw_ns[4], sw_max[4];
+static void sync_wait_note(uint64_t lag, uint64_t t0, uint64_t t1) {
+    int b = lag < 3 ? (int)lag : 3;
+    __atomic_fetch_add(&sw_n[b], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sw_ns[b], t1 - t0, __ATOMIC_RELAXED);
+    uint64_t m = __atomic_load_n(&sw_max[b], __ATOMIC_RELAXED);
+    while (t1 - t0 > m && !__atomic_compare_exchange_n(&sw_max[b], &m, t1 - t0, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {}
+    uint64_t last = __atomic_load_n(&sw_log_ns, __ATOMIC_RELAXED);
+    if (!last) { __atomic_compare_exchange_n(&sw_log_ns, &last, t1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED); return; }
+    if (t1 - last < 5000000000ull || !__atomic_compare_exchange_n(&sw_log_ns, &last, t1, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+        return;
+    uint64_t n[4], ns[4], mx[4];
+    for (int i = 0; i < 4; i++)
+        n[i] = __atomic_exchange_n(&sw_n[i], 0, __ATOMIC_RELAXED), ns[i] = __atomic_exchange_n(&sw_ns[i], 0, __ATOMIC_RELAXED),
+        mx[i] = __atomic_exchange_n(&sw_max[i], 0, __ATOMIC_RELAXED);
+    double s = (t1 - last) / 1e9;
+    rt_log("perf: nvnSyncWait over %.1f s: %llu already signalled; blocked, by submissions behind the newest: "
+           "0: %llu, %.1f ms/s, avg %.2f max %.2f; 1: %llu, %.1f ms/s, avg %.2f max %.2f; 2: %llu, %.1f ms/s, avg %.2f "
+           "max %.2f; 3+: %llu, %.1f ms/s, avg %.2f max %.2f", s,
+           (unsigned long long)__atomic_exchange_n(&sw_ready, 0, __ATOMIC_RELAXED),
+           (unsigned long long)n[0], ns[0] / 1e6 / s, n[0] ? ns[0] / 1e6 / n[0] : 0.0, mx[0] / 1e6,
+           (unsigned long long)n[1], ns[1] / 1e6 / s, n[1] ? ns[1] / 1e6 / n[1] : 0.0, mx[1] / 1e6,
+           (unsigned long long)n[2], ns[2] / 1e6 / s, n[2] ? ns[2] / 1e6 / n[2] : 0.0, mx[2] / 1e6,
+           (unsigned long long)n[3], ns[3] / 1e6 / s, n[3] ? ns[3] / 1e6 / n[3] : 0.0, mx[3] / 1e6);
+}
+
 // NVNsyncWaitResult nvnSyncWait(const NVNsync *s, uint64_t timeout_ns): a sync never fenced reports a timeout at once;
 // a fenced one is released only after the back end completed that fence value
 NVN_API(nvnSyncWait) {
@@ -478,12 +506,20 @@ NVN_API(nvnSyncWait) {
     uint64_t timeout = arg_x(c, 1);
     if (!s->fenced) { ret_x(c, NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED); return; }
     const GfxBackend *b = gfx_backend();
-    if (b->fence_done() >= s->fence) { b->cpu_synced(s->fence); ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED); return; }
+    if (b->fence_done() >= s->fence) {
+        if (rt_trace & RT_TRACE_PERF) __atomic_fetch_add(&sw_ready, 1, __ATOMIC_RELAXED);
+        b->cpu_synced(s->fence);
+        ret_x(c, NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED);
+        return;
+    }
     int ok;
+    const int timed = (rt_trace & RT_TRACE_PERF) != 0;
+    uint64_t lag = timed ? nvn_fence_last() - s->fence : 0, t0 = timed ? kern_now_ns() : 0;
     {
         NVN_BLOCKING();
         ok = b->fence_wait(s->fence, timeout);
     }
+    if (timed) sync_wait_note(lag, t0, kern_now_ns());
     if (ok) b->cpu_synced(s->fence);
     ret_x(c, ok ? NVN_SYNC_WAIT_RESULT_CONDITION_SATISFIED : NVN_SYNC_WAIT_RESULT_TIMEOUT_EXPIRED);
 }
