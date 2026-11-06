@@ -10,7 +10,7 @@
 #define TX (VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT)
 #define DS VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT
 
-enum { F_RGB = 1, F_X = 2 };   // expand_rgb, alpha_one
+enum { F_RGB = 1, F_X = 2, F_P16 = 4 };   // expand_rgb, alpha_one, 16-bit packed
 
 // chan: the component order vk holds (TexVkFormat.chan), zero when it is NVN's. alt, alt_chan: a mandatory format
 // standing in, with its order, when the device lacks vk.
@@ -29,7 +29,7 @@ typedef struct { VkFormat vk; uint8_t flags; const char *note; uint8_t chan[4]; 
 // ground textures along one axis.
 enum { CR = NVN_TEXTURE_SWIZZLE_R, CG = NVN_TEXTURE_SWIZZLE_G, CB = NVN_TEXTURE_SWIZZLE_B, CA = NVN_TEXTURE_SWIZZLE_A };
 #define P(nvn, vkf, fl, c0, c1, c2, c3, altf, a0, a1, a2, a3) \
-    [nvn] = {vkf, fl, "16-bit packed format, NVN names components from the least significant bit", {c0, c1, c2, c3}, altf, \
+    [nvn] = {vkf, (fl) | F_P16, "16-bit packed format, NVN names components from the least significant bit", {c0, c1, c2, c3}, altf, \
              {a0, a1, a2, a3}}
 
 static const Row rows[0x9D] = {
@@ -152,6 +152,16 @@ int tex_vk_format(int nvn_format, TexVkFormat *o) {
         memcpy(o->chan, r->alt_chan, sizeof o->chan);
         o->note = "16-bit packed format: the device lacks the exact Vulkan format, a mandatory one stands in with the "
                   "components reordered by the view swizzle";
+    }
+    // MoltenVK on AMD and Intel GPUs has none of the 16-bit packed formats (Metal has them on Apple GPUs only), not
+    // even the mandatory stand-ins: the texture would not be created and would sample as zeros (the terrain's normal
+    // and blend maps among them). RGBA8 holds them instead, each texel expanded on upload as the table's own format
+    // defines its components, so the view swizzle (chan) stays the table's.
+    if ((r->flags & F_P16) && vk_ctx() && !tex_vk_format_supported(o)) {
+        o->pack16 = r->vk;
+        memcpy(o->chan, r->chan, sizeof o->chan);
+        o->vk = VK_FORMAT_R8G8B8A8_UNORM;
+        o->note = "16-bit packed format the device lacks: stored as RGBA8, each texel expanded on upload";
     }
     if (f == 0x31) o->stencil = 1;
     if (f >= 0x32 && f <= 0x34) o->depth = 1;

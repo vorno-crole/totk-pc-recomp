@@ -48,6 +48,8 @@ typedef struct TexVkFormat {
     VkFormat ideal;               // format the NVN format maps to by itself; differs from vk after a fallback
     VkFormatFeatureFlags need;    // optimal-tiling features vk must report for sampling and upload
     uint8_t expand_rgb;           // 3-component format: the upload expands each texel to 4 components (alpha / integer 1)
+    VkFormat pack16;              // nonzero: 16-bit packed texels in this Vulkan format, which the device lacks; vk is
+                                  // RGBA8 and uploads expand each texel to it (read-backs pack it again)
     uint8_t alpha_one;            // "X" format: sample alpha as 1 (view swizzle)
     uint8_t chan[4];              // nonzero chan[0]: vk stands in with another component order; chan[i] is the
                                   // NVN_TEXTURE_SWIZZLE_R..A selector of the image component holding R, G, B, A
