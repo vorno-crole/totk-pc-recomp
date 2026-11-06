@@ -160,7 +160,8 @@ elif MAC:
     RT_FLAGS += [MAC_MIN, '-I/usr/local/include']   # Homebrew LLVM does not search Homebrew's own headers
     LINK_FLAGS = ['-fuse-ld=lld', MAC_MIN, "'-Wl,-rpath,@executable_path'", '-L/usr/local/lib', '"-Wl,-map,$builddir/totk.map"']
     LINK_LIBS = ['-lvulkan', '-lSDL3', '-lopus', '-lvpx', '-lzstd', '-lc++', '-lm', '-lpthread',
-                 '-Wl,-framework,IOKit', '-Wl,-framework,CoreFoundation']   # IOKit: the GPU's statistics (macos.c)
+                 '-Wl,-framework,IOKit', '-Wl,-framework,CoreFoundation', '-Wl,-framework,CoreGraphics']
+    # IOKit: the GPU's statistics; CoreGraphics: the display's mode (macos.c)
     VMA_INCLUDE = Path('/usr/local/include')
 else:
     # -no-pie: the lifted modules' function tables (hundreds of thousands of pointers) need no load-time relocation.
