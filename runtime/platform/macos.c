@@ -32,6 +32,7 @@
 #include <unistd.h>
 
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CGDirectDisplay.h>
 #include <IOKit/IOKitLib.h>
 #include <SDL3/SDL_clipboard.h>
 
@@ -1002,6 +1003,18 @@ void plat_reexec(void) {
 int plat_mem_read(uint64_t addr, void *out, size_t n) {
     mach_vm_size_t got = 0;
     return mach_vm_read_overwrite(mach_task_self(), addr, n, (mach_vm_address_t)(uintptr_t)out, &got) == KERN_SUCCESS && got == n;
+}
+
+// The main display's current mode in physical pixels, as on Windows: a Retina mode that looks like 1920x1080 reports
+// its 3840x2160 backing size, which has the same shape. cfg.c screen_default needs only the shape.
+int plat_screen_size(int *w, int *h) {
+    CGDisplayModeRef m = CGDisplayCopyDisplayMode(CGMainDisplayID());
+    if (!m) return 0;
+    size_t pw = CGDisplayModeGetPixelWidth(m), ph = CGDisplayModeGetPixelHeight(m);
+    CGDisplayModeRelease(m);
+    if (!pw || !ph) return 0;
+    *w = (int)pw, *h = (int)ph;
+    return 1;
 }
 
 int plat_mem_readable(uint64_t addr, uint64_t n) {
