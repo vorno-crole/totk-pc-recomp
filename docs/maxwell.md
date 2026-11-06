@@ -177,7 +177,8 @@ Grep-level look on 2026-10-22, statuses updated 2026-10-26; "saw" is what the gr
 6. **Subgroup size.** The translator assumes 32; RDNA4 may run fragment shaders in wave64. `vk_caps.c` and
    `vk_pipeline.c` `pin_subgroup32` pin stages to 32 lanes with `VkPipelineShaderStageRequiredSubgroupSizeCreateInfo`
    where `subgroupSizeControl` allows it, and otherwise tell the translator the GPU's own size
-   (`TOTK_VK_SUBGROUP_PIN=0` forces that). **Fixed.**
+   (`TOTK_VK_SUBGROUP_PIN=0` forces that). A stage the driver lists without subgroup operations (the vertex stage on
+   MoltenVK with AMD GPUs) gets one-lane modules from `vk_pipeline.c` `spirv_one_lane`. **Fixed.**
 7. **Images aliased onto GPU-only pool memory.** `vk_texture.c` `bind_pool_memory` binds each `VkImage` into its pool
    allocation; textures are keyed by address plus descriptor, and each new image starts `UNDEFINED` (`init_image`). Two descriptors over the
    same storage, or bytes written through a buffer, do not see each other's data on AMD. Check: count distinct keys per

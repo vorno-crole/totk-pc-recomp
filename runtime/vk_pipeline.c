@@ -883,6 +883,144 @@ out:
     return o;
 }
 
+// SPIRV_ONE_LANE_BEGIN (tests compile the code between these markers on its own)
+// A stage the driver runs without subgroup operations gets a module whose subgroup is one lane. MoltenVK reports
+// subgroups for the fragment and compute stages only on AMD (supportedStages 0x32), as Metal has no SIMD-group
+// functions in vertex functions there, and Apple's compiler rejects a vertex shader that uses them, so the pipeline is
+// not built and its draws are skipped. TotK's vertex shaders use them for one pattern: the lane with the highest bit of
+// a ballot adds the ballot's bit count to an atomic counter, the usual way to save atomics on a 32-lane warp (a draw of
+// points into no target, in every session). With one lane each invocation adds its own 1, the same total. The rewrite,
+// per operation:
+//  - Ballot of p: (p ? 1 : 0, 0, 0, 0); All and Any of p: p; AllEqual and Elect: true; Broadcast, BroadcastFirst, the
+//    four shuffles: the invocation's own value (the only lane there is); the SPV_KHR_shader_ballot and
+//    SPV_KHR_subgroup_vote forms alike;
+//  - loads of SubgroupLocalInvocationId: 0, SubgroupSize: 1, the lane masks Eq, Ge, Le: (1, 0, 0, 0), Gt, Lt: 0; the
+//    built-in variables, their decorations and names, and their entry point interface entries are removed.
+// Returns NULL when there is nothing to change, or when the module uses something else (other group operations, a lane
+// built-in through an access chain or another instruction than OpLoad): it is then left as it was.
+static uint32_t *spirv_one_lane(const uint32_t *w, uint64_t n, uint64_t *out_n) {
+    enum { OP_NAME = 5, OP_TYPE_BOOL = 20, OP_CONSTANT_TRUE = 41, OP_LOAD = 61, OP_COMPOSITE_CONSTRUCT = 80,
+           OP_COPY_OBJECT = 83, OP_SELECT = 169, OP_MEMBER_DECORATE = 72,
+           OP_ELECT = 333, OP_ALL = 334, OP_ANY = 335, OP_ALL_EQUAL = 336, OP_BROADCAST = 337, OP_BROADCAST_FIRST = 338,
+           OP_BALLOT = 339, OP_SHUFFLE = 345, OP_SHUFFLE_DOWN = 348, OP_GROUP_LAST = 366,
+           OP_BALLOT_KHR = 4421, OP_FIRST_INVOCATION_KHR = 4422, OP_ALL_KHR = 4428, OP_ANY_KHR = 4429,
+           OP_ALL_EQUAL_KHR = 4430, OP_READ_INVOCATION_KHR = 4432,
+           BI_SIZE = 36, BI_NUM_SUBGROUPS = 38, BI_SUBGROUP_ID = 40, BI_LANE = 41, BI_EQ = 4416, BI_GE = 4417,
+           BI_GT = 4418, BI_LE = 4419, BI_LT = 4420 };
+    if (n < 5 || w[3] >= (1u << 22)) return NULL;
+    uint32_t bound = w[3];
+    uint32_t *lane = calloc(bound, sizeof *lane), *pointee = calloc(bound, sizeof *pointee),
+             *vtype = calloc(bound, sizeof *vtype), *vec_comp = calloc(bound, sizeof *vec_comp),
+             *vec_count = calloc(bound, sizeof *vec_count), *o = NULL;
+    uint32_t uint_t = 0, bool_t = 0, changes = 0, ballots = 0, nlane = 0;
+    uint64_t fn_at = 0;
+    int ok = lane && pointee && vtype && vec_comp && vec_count;
+    for (uint64_t i = 5; ok && i < n;) {   // pass 1: types, lane built-ins, and whether every group operation is known
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        if (!l || i + l > n) { ok = 0; break; }
+        const uint32_t *a = w + i + 1;
+        if (op == SPV_OP_TYPE_INT && l >= 4 && a[1] == 32 && !a[2]) uint_t = a[0];
+        else if (op == OP_TYPE_BOOL && l >= 2) bool_t = a[0];
+        else if (op == SPV_OP_TYPE_VECTOR && l >= 4 && a[0] < bound) vec_comp[a[0]] = a[1], vec_count[a[0]] = a[2];
+        else if (op == SPV_OP_TYPE_POINTER && l >= 4 && a[0] < bound) pointee[a[0]] = a[2];
+        else if (op == SPV_OP_VARIABLE && l >= 4 && a[1] < bound) vtype[a[1]] = a[0] < bound ? pointee[a[0]] : 0;
+        else if (op == SPV_OP_DECORATE && l >= 4 && a[1] == SPV_DEC_BUILTIN && a[0] < bound) {
+            uint32_t b = a[2];
+            if (b == BI_NUM_SUBGROUPS || b == BI_SUBGROUP_ID) ok = 0;   // compute only; not rewritten
+            else if (b == BI_SIZE || b == BI_LANE || (b >= BI_EQ && b <= BI_LT)) lane[a[0]] = b, nlane++;
+        } else if (op == SPV_OP_FUNCTION && !fn_at) fn_at = i;
+        if (fn_at && i >= fn_at) {
+            if (op == OP_LOAD && l >= 4 && a[2] < bound && lane[a[2]]) changes++;
+            else if (op == OP_BALLOT || op == OP_BALLOT_KHR) {
+                uint32_t t = a[0] < bound ? a[0] : 0;
+                if (!uint_t || vec_comp[t] != uint_t || vec_count[t] != 4) ok = 0;
+                ballots++, changes++;
+            } else if ((op >= OP_ELECT && op <= OP_BALLOT) || (op >= OP_SHUFFLE && op <= OP_SHUFFLE_DOWN) ||
+                       op == OP_FIRST_INVOCATION_KHR || (op >= OP_ALL_KHR && op <= OP_ALL_EQUAL_KHR) ||
+                       op == OP_READ_INVOCATION_KHR) {
+                if ((op == OP_ELECT || op == OP_ALL_EQUAL || op == OP_ALL_EQUAL_KHR) && !bool_t) ok = 0;
+                changes++;
+            } else if ((op > OP_BALLOT && op <= OP_GROUP_LAST) || (op >= 4421 && op <= 4432)) {
+                ok = 0;   // a group operation without a rewrite here (bit counts, arithmetic, quads, ...)
+            } else if (nlane) {
+                for (uint32_t k = 1; k < l; k++)   // any other use of a lane built-in (a literal can match: no rewrite)
+                    if (a[k - 1] < bound && lane[a[k - 1]]) ok = 0;
+            }
+        }
+        i += l;
+    }
+    if (!ok || !changes || !fn_at) goto out;
+    for (uint32_t v = 0; v < bound; v++) {   // mask built-ins: a uint or a 4 x uint
+        if (!lane[v] || lane[v] == BI_SIZE || lane[v] == BI_LANE) continue;
+        uint32_t t = vtype[v];
+        if (!uint_t || !(t == uint_t || (t < bound && vec_comp[t] == uint_t && vec_count[t] == 4))) { ok = 0; break; }
+    }
+    if (!ok) goto out;
+    // New ids: an unsigned int type when there is none, 0, 1, true, and per mask built-in a constant.
+    uint32_t new_uint = !uint_t, c0, c1, ctrue = 0;
+    if (new_uint) uint_t = bound++;
+    c0 = bound++, c1 = bound++;
+    if (bool_t) ctrue = bound++;
+    uint32_t *val = calloc(w[3], sizeof *val);   // lane built-in -> the constant its loads become
+    uint64_t cap = n + 8 * (uint64_t)ballots + 32 + 8 * (uint64_t)nlane;
+    if (!val || !(o = malloc(cap * 4))) { free(val); free(o); o = NULL; goto out; }
+    uint64_t on = 5;
+    memcpy(o, w, 5 * 4);
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, l = w[i] >> 16;
+        const uint32_t *a = w + i + 1;
+        if (i == fn_at) {   // the new constants, after every existing global declaration
+            if (new_uint) o[on++] = 4u << 16 | SPV_OP_TYPE_INT, o[on++] = uint_t, o[on++] = 32, o[on++] = 0;
+            o[on++] = 4u << 16 | SPV_OP_CONSTANT, o[on++] = uint_t, o[on++] = c0, o[on++] = 0;
+            o[on++] = 4u << 16 | SPV_OP_CONSTANT, o[on++] = uint_t, o[on++] = c1, o[on++] = 1;
+            if (ctrue) o[on++] = 3u << 16 | OP_CONSTANT_TRUE, o[on++] = bool_t, o[on++] = ctrue;
+            for (uint32_t v = 0; v < w[3]; v++) {
+                if (!lane[v]) continue;
+                uint32_t b = lane[v], one = b == BI_SIZE || b == BI_EQ || b == BI_GE || b == BI_LE;
+                if (b == BI_SIZE || b == BI_LANE || vtype[v] == uint_t) { val[v] = one ? c1 : c0; continue; }
+                val[v] = bound++;
+                o[on++] = 7u << 16 | SPV_OP_CONSTANT_COMPOSITE, o[on++] = vtype[v], o[on++] = val[v];
+                o[on++] = one ? c1 : c0, o[on++] = c0, o[on++] = c0, o[on++] = c0;
+            }
+        }
+        if (op == SPV_OP_ENTRY_POINT && l >= 4) {   // model, id, name (a literal string), interface ids
+            uint64_t start = on, k = 3;
+            while (k < l && w[i + k] >> 24) k++;   // the string ends in the first word whose last byte is zero
+            k++;
+            for (uint64_t j = 0; j < k && j < l; j++) o[on++] = w[i + j];
+            for (; k < l; k++)
+                if (!(w[i + k] < w[3] && lane[w[i + k]])) o[on++] = w[i + k];
+            o[start] = (uint32_t)(on - start) << 16 | op;
+        } else if ((op == OP_NAME || op == SPV_OP_DECORATE || op == OP_MEMBER_DECORATE) && l >= 2 && a[0] < w[3] && lane[a[0]]) {
+        } else if (op == SPV_OP_VARIABLE && l >= 4 && a[1] < w[3] && lane[a[1]]) {
+        } else if (i > fn_at && op == OP_LOAD && l >= 4 && a[2] < w[3] && lane[a[2]]) {
+            o[on++] = 4u << 16 | OP_COPY_OBJECT, o[on++] = a[0], o[on++] = a[1], o[on++] = val[a[2]];
+        } else if (i > fn_at && (op == OP_BALLOT || op == OP_BALLOT_KHR)) {
+            uint32_t pred = op == OP_BALLOT ? a[3] : a[2], t = bound++;
+            o[on++] = 6u << 16 | OP_SELECT, o[on++] = uint_t, o[on++] = t, o[on++] = pred, o[on++] = c1, o[on++] = c0;
+            o[on++] = 7u << 16 | OP_COMPOSITE_CONSTRUCT, o[on++] = a[0], o[on++] = a[1];
+            o[on++] = t, o[on++] = c0, o[on++] = c0, o[on++] = c0;
+        } else if (i > fn_at && ((op >= OP_ELECT && op <= OP_BROADCAST_FIRST) || (op >= OP_SHUFFLE && op <= OP_SHUFFLE_DOWN) ||
+                                 op == OP_FIRST_INVOCATION_KHR || (op >= OP_ALL_KHR && op <= OP_ALL_EQUAL_KHR) ||
+                                 op == OP_READ_INVOCATION_KHR)) {
+            // NonUniform forms have the scope at a[2] and the value at a[3]; the KHR forms have no scope
+            uint32_t from = op == OP_ELECT || op == OP_ALL_EQUAL || op == OP_ALL_EQUAL_KHR ? ctrue
+                          : op >= OP_BALLOT_KHR ? a[2] : a[3];
+            o[on++] = 4u << 16 | OP_COPY_OBJECT, o[on++] = a[0], o[on++] = a[1], o[on++] = from;
+        } else {
+            memcpy(o + on, w + i, l * 4), on += l;
+        }
+        i += l;
+    }
+    o[3] = bound;
+    *out_n = on;
+    free(val);
+out:
+    free(lane), free(pointee), free(vtype), free(vec_comp), free(vec_count);
+    return o;
+}
+// SPIRV_ONE_LANE_END
+
 // True when the module declares a GroupNonUniform* or SubgroupBallot-style capability (lane masks assume 32 lanes).
 static int uses_subgroup_ops(const uint32_t *w, uint64_t words) {
     for (uint64_t i = 5; i < words;) {
@@ -909,10 +1047,27 @@ static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
     if (fixed) w = fixed, words = fixed_n;
+    // The stage is the first entry point's execution model (Vertex 0 ... GLCompute 5 are stage bits 1 << model).
+    uint32_t *one = NULL;
+    uint64_t model = 6;
+    for (uint64_t i = 5; i < words && model == 6;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > words) break;
+        if (op == SPV_OP_ENTRY_POINT && len >= 3) model = w[i + 1];
+        i += len;
+    }
+    if (model < 6 && vk_caps.sg_stages && !(vk_caps.sg_stages & (1u << model)) && uses_subgroup_ops(w, words)) {
+        uint64_t one_n = 0;
+        if ((one = spirv_one_lane(w, words, &one_n))) {
+            w = one, words = one_n;
+            LOG_ONCE("vk_pipeline: stage %#x has no subgroup operations on this driver (stages %#x): its shaders that use "
+                     "them run with one-lane subgroups", 1u << model, (unsigned)vk_caps.sg_stages);
+        }
+    }
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = (size_t)words * 4, .pCode = w};
     VkShaderModule m = VK_NULL_HANDLE;
     VkResult r = vkCreateShaderModule(P.device, &ci, NULL, &m);
-    free(fixed);
+    free(fixed), free(one);
     return r == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
 
@@ -1493,7 +1648,17 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     plat_mutex_unlock_shared(&cache_use);
     perf_end(PERF_PIPE, p0);   // counts on the render thread only, so background builds stay out of it
     if (r != VK_SUCCESS) {
-        rt_log("vk_pipeline: vkCreateGraphicsPipelines failed (%d)", (int)r);
+        // Names the pipeline, so a failure the driver does not explain (MoltenVK returns -3 when Metal rejects the
+        // translated shaders) can be matched to its shaders and state.
+        const uint8_t *kv = gfx_shader_key(s->vs), *kf = s->fs ? gfx_shader_key(s->fs) : NULL;
+        rt_log("vk_pipeline: vkCreateGraphicsPipelines failed (%d): vs %02x%02x%02x%02x%02x%02x%02x%02x fs "
+               "%02x%02x%02x%02x%02x%02x%02x%02x; %u targets %u %u %u %u, depth %u stencil %u, samples %u, topology "
+               "class %u, polygon mode %u, logic op %u, alpha to coverage %u, dual source %u, feedback %u, blend %#x, "
+               "write mask %#x, clamp %u", (int)r, kv[0], kv[1], kv[2], kv[3], kv[4], kv[5], kv[6], kv[7],
+               kf ? kf[0] : 0, kf ? kf[1] : 0, kf ? kf[2] : 0, kf ? kf[3] : 0, kf ? kf[4] : 0, kf ? kf[5] : 0,
+               kf ? kf[6] : 0, kf ? kf[7] : 0, k->n_color, k->color[0], k->color[1], k->color[2], k->color[3],
+               k->depth, k->stencil, k->samples, k->topo_class, k->poly_mode, k->logic_op, k->a2c, k->dsb, k->fbl,
+               k->blend_en, k->wmask, k->clamp);
         pipe = VK_NULL_HANDLE;
     } else {
         perf_count(PERF_CNT_PIPE_BUILT);
