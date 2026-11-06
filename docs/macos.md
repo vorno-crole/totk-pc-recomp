@@ -45,7 +45,7 @@ portability enumeration reports Vulkan 1.4.357, driver id MoltenVK. What each ru
 | `shaderFloat64` | no | existing softfloat64 path (`vk_caps.c`) |
 | ASTC | no | the compute decoder runs, after a change for Metal's compiler, see [ASTC](#the-astc-compute-decoder-and-the-metal-compiler) |
 | Graphics pipeline library | no | existing whole-pipeline path, the default on AMD RDNA 1/2 on Windows |
-| Subgroup size 32 | yes, fixed at 32 | the pin works |
+| Subgroup size 32 | yes, fixed at 32, but only in the fragment, compute and tessellation control stages (`supportedStages` 0x32) | the pin works; vertex shaders that use subgroup operations get one-lane modules, see [Fused-weapon icons](#fused-weapon-icons) |
 | `minStorageBufferOffsetAlignment` 4 | 16 | existing rounding path (`vk_caps.c`) |
 | 16-bit packed formats (RGB565, RGB5A1, RGBA4) | **no**, not even the mandatory stand-ins: Metal has them on Apple GPUs only | stored as RGBA8, each texel expanded on upload, see [Fused-weapon icons](#fused-weapon-icons) |
 | `VK_EXT_attachment_feedback_loop_layout` | no | existing `VK_FEEDBACK_RESTART` path |
@@ -416,6 +416,19 @@ maps. Such a texture is now RGBA8 (`TexVkFormat.pack16`): each texel is expanded
 defines its fields, the view swizzle stays the table's, and a read-back packs it again (`vk_texture.c`
 `expand_pack16`, `shrink_pack16`; all 65,536 values of each format survive the round trip). `--probe-vkmem` no longer
 lists the eight formats as unsupported, and weapons fused since show their icons.
+
+On the way a second fault turned up, in every session's log: one pipeline failed with `vkCreateGraphicsPipelines
+failed (-3)` and its draws were skipped. The failure line now names the pipeline's shaders and state (`vk_pipeline.c`
+`create_graphics`), and with `MVK_CONFIG_LOG_LEVEL=2` MoltenVK said the vertex function did not compile. MoltenVK
+reports subgroup operations for the fragment, compute and tessellation control stages only, as Metal has no SIMD-group
+functions in vertex functions on these GPUs, but the translator is told 32 lanes for every stage. 21 of the 5,140
+cached vertex shaders use them: 18 a vote, 3 a ballot and the lane index, where the lane with the ballot's highest bit
+adds the ballot's bit count to an atomic counter. `vk_pipeline.c` `spirv_one_lane` now rewrites such a module for a
+stage the driver lists without subgroups as a one-lane subgroup (a ballot of p is (p, 0, 0, 0), a vote of p is p, the
+lane index 0, a shuffle the invocation's own value), which gives the counter the same total; `make_module` applies it
+only to modules that use the operations. Over the whole cache, the 50 modules it changes pass `spirv-val` and the rest
+come back unchanged, and in play the pipeline builds. The failing pipeline drew points into no target, and fixing it
+alone did not bring the icons back.
 
 An icon captured while the bug was there stays in the cache, and the game shows it instead of capturing it again: an
 axe picked up on the first day stayed dark after the fix until its `Weapon_000.png` was removed, then the game captured
