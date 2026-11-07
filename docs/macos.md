@@ -465,11 +465,31 @@ before, the previous frame. `macos.c` `hot_keep` now leaves a page that was repo
 The per-draw check of the vertex layouts for Metal's 4-byte alignment (`vk_exec_draw.c` `valign_streams`) is now kept
 until the attribute state changes. It cost 6% of the replay thread; its effect on the frame rate is inside the noise.
 
-`TOTK_ONE_PER_CORE` has nothing to act on here: the i7-9700K has no SMT, and macOS has no affinity calls. Next to look
-at is the fence wait: what the game waits for each frame, and whether the chain can overlap with the next frame.
+`TOTK_ONE_PER_CORE` has nothing to act on here: the i7-9700K has no SMT, and macOS has no affinity calls.
 
 All three together, with no environment set: 26.9 and 27.4 fps, the replay 10-11 ms a frame, against 22.9 and 24.7
 before, about 15% more.
+
+The fence wait came next. Two `TOTK_TRACE=perf` lines measure it: `perf: nvnSyncWait` sorts the game's sync waits by
+how many submissions the waited value lies behind the newest (`nvn_api_core.c`), and `perf: fence chain` times each
+value from `vkQueueSubmit2` to the completion thread seeing it signalled, and from there to the waiting threads waking
+(`vk_sync.c`). The game waits once a frame for the submission it has just made (0 behind), so the frame cannot overlap
+with the GPU's work on it; submit to signalled took 27 ms, signalled to done 0.12 ms. The GPU's own time was the
+length of the chain. A Metal System Trace (`xcrun xctrace record --template 'Metal System Trace' --attach <pid>`)
+showed about 270 render encoders and 244 blit encoders of one small copy each per frame: every `UpdateUniformBuffer`
+(about 12,000 a second, 170 bytes on average) ended the render pass to record a `vkCmdCopyBuffer` into the uniform
+buffer, and MoltenVK turns each pass and each copy into a Metal encoder of its own.
+
+Keeping the updates inside the pass removes those encoders. This branch first did it with a setting of its own,
+`TOTK_UB_PATCH`, which wrote each update into the submission's uniform snapshot (`vk_usnap.c`), bound a patched copy to
+later draws and batched the buffer copies where the pass ended anyway. In interleaved runs on Great Sky Island, with
+other applications using the GPU: 23.9 and 24.3 fps without it, 33.4 and 36.6 with it; GPU time per frame 36-42 ms
+against 11-17, submit to signalled 27 ms against 13. Upstream's `ub_overlay` (v0.3.12, pull request #743; on by
+default on every platform) does the same with scratch overlays whose copies go behind one barrier at the next full
+barrier (`vk_exec_draw.c` `vk_exec_ub_flush`), so the rebase onto v0.3.12 dropped `TOTK_UB_PATCH` for it. The branch
+also carries upstream's #896 from `dev`, which orders partly overlapping overlay copies with a transfer barrier so the
+newer update lands last. `ub_overlay` has not been measured on this Mac yet; an hour of play on v0.3.11, which still
+had `TOTK_UB_PATCH`, went from Great Sky Island down to Hyrule without a fault.
 
 Profile-guided optimisation does not help yet. An instrumented build (`-fprofile-instr-generate` on the generated code
 and the runtime; `LLVM_PROFILE_FILE` with `%c`, continuous mode, because `plat_exit` skips the exit handlers that
@@ -481,7 +501,9 @@ fps for one build on the same day), so compare builds only in runs interleaved i
 
 ## Status
 
-The game builds and plays on this machine: title screen, saves, the opening cave ([First boot](#first-boot)), and standing still on Great Sky Island in scripted runs. Walking further has not been tested.
+The game builds and plays on this machine: title screen, saves, the opening cave ([First boot](#first-boot)), standing
+still on Great Sky Island in scripted runs, and an hour of play on v0.3.11 from Great Sky Island down to Hyrule, Fuse and
+its weapon icons included.
 
 v0.3.7 ran the replay on its own thread by default. A scripted run on Great Sky Island with it on and off: 42.5 and
 41.9 fps mean, 169 and 160 frames over 50 ms, no crash in either. v0.3.10 turned it off by default again for uneven
@@ -492,6 +514,12 @@ first start after an update that changes it rebuilds every pipeline before the w
 mirror mode, 4-6 dispatches a frame on the title screen, which holds 59 fps.
 
 On a heavier view of the island the frame rate is 27 fps after the changes in [Frame rate](#frame-rate), 23-25 before.
+
+The way down to Hyrule stalled on pipeline builds, as any first visit does: in that hour 107 frames spent over 100 ms
+building pipelines, the worst 1.6 s, and no pipeline failed. MoltenVK has no graphics pipeline library, so a draw whose
+pipeline is missing builds it whole; draws into per-frame passes and full-screen draws are skipped meanwhile
+(`pipe_skip = fullscreen`, the default), the others wait, and two background workers build them. Every new pipeline is
+recorded in `pipeline-keys.bin` and built at the next start (4,505 in about 5 s), so a second visit is smooth.
 
 `display = n` in `[display]` (`TOTK_DISPLAY`, `gfx_window_sdl.c` `move_to_display`) opens the window on the n-th display
 of the log's `gfx: display` lines, and fullscreen then covers that display; without it macOS opens the window on the
@@ -545,12 +573,12 @@ In the order it is likely to pay off:
    Include a `TOTK_AUDIO_DUMP` where the game uses reverb (a cave, a shrine) to check the frame seams.
 2. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
    `TOTK_ASTC=cpu`.
-3. **The fence wait.** The game's main thread waits for GPU fences for 47% of its time while nothing is saturated
-   ([Frame rate](#frame-rate)). Find what it waits for each frame and whether the chain can overlap with the next one.
+3. **`ub_overlay` on this Mac.** Measure Great Sky Island with upstream's overlays against `ub_overlay=0` and against
+   the 33-37 fps of the earlier `TOTK_UB_PATCH` ([Frame rate](#frame-rate)), check the map and the menus, and take a
+   new Metal System Trace to count the encoders a frame now.
 4. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
    `tools/prepare_shaders.py` build pipelines at install time.
 5. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
-6. **Profile-guided optimisation** again once the fence wait is gone and the CPU side limits the frame
-   ([Frame rate](#frame-rate)).
+6. **Profile-guided optimisation** again once the CPU side limits the frame ([Frame rate](#frame-rate)).
 7. If a trace or compile failure points there: triangle fans as lists (`vk_exec_draw.c` `op_draw`), `Coherent` in
    `vk_pipeline.c` `spirv_fixup`, the title colour against the reference, `--probe-window`'s +1/255.
