@@ -3,7 +3,7 @@
 **TotK Recomp** is a static recompilation of *The Legend of Zelda: Tears of the Kingdom* (Nintendo Switch, 2023) into a native x86-64 application for Windows and Linux ([docs/architecture.md](docs/architecture.md)).
 
 > [!NOTE]
-> **This is a fork that adds an Intel Mac port** to [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp). The work is on the branch [`macos-intel`](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel). On the one Mac it has been tried on, the game reaches its title screen and plays its opening cave at about 60 fps, and runs at 27 to 42 fps standing on Great Sky Island from a save, and has been played for an hour from Great Sky Island down to Hyrule. There is no installer and no packaged app: you build it from source with your own game files. [macOS status](#macos-intel) has the details.
+> **This is a fork that adds an Intel Mac port** to [valentderah/totk-pc-recomp](https://github.com/valentderah/totk-pc-recomp). The work is on the branch [`macos-intel`](https://github.com/vorno-crole/totk-pc-recomp/tree/macos-intel). On the one Mac it has been tried on, the game reaches its title screen and plays its opening cave at about 60 fps, and runs at 27 to 42 fps standing on Great Sky Island from a save, and has been played for two one-hour sessions from Great Sky Island down to Hyrule, at a median of 42 fps in the second. There is no installer and no packaged app: you build it from source with your own game files. [macOS status](#macos-intel) has the details.
 >
 > Report Mac problems to this fork, not upstream. The Windows and Linux sections below describe upstream's work; those builds have not been rerun with this branch's changes.
 

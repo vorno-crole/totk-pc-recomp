@@ -488,8 +488,18 @@ against 11-17, submit to signalled 27 ms against 13. Upstream's `ub_overlay` (v0
 default on every platform) does the same with scratch overlays whose copies go behind one barrier at the next full
 barrier (`vk_exec_draw.c` `vk_exec_ub_flush`), so the rebase onto v0.3.12 dropped `TOTK_UB_PATCH` for it. The branch
 also carries upstream's #896 from `dev`, which orders partly overlapping overlay copies with a transfer barrier so the
-newer update lands last. `ub_overlay` has not been measured on this Mac yet; an hour of play on v0.3.11, which still
-had `TOTK_UB_PATCH`, went from Great Sky Island down to Hyrule without a fault.
+newer update lands last. An hour of play on v0.3.12 with `ub_overlay` on (58 per-minute `frametime` lines in the log,
+Hyrule and Great Sky Island, other applications open): a mean of 30 to 53 fps a minute, median 42, against the 33-37
+fps `TOTK_UB_PATCH` gave standing on Great Sky Island; 50 of the 58 minutes had at most 4 frames over 100 ms, the
+pipelines of areas seen before being built at start (6,434 in about 1.2 s after the device was ready). Not an
+interleaved comparison, but nothing was lost by taking upstream's version.
+
+Two pipelines failed in that hour, both depth-only (no colour target, `D16_UNORM`, triangles), with `-3`
+(`VK_ERROR_INITIALIZATION_FAILED`) from MoltenVK: vertex shaders `80896ea6afda6580` and `9939bf5180be64a6`, fragment
+shaders `6b102e6094e75417` and `3a664940fb78f69d`. The four modules pass `spirv-val`, the vertex shaders use no subgroup
+operations, the fragment inputs match the vertex outputs, and the interlock capability they declare is declared by
+every fragment shader in the cache. Both vertex shaders read a `uint4` attribute at location 6; Metal refuses a
+pipeline whose vertex format cannot be read as the shader's type, which the failure line does not show yet.
 
 Profile-guided optimisation does not help yet. An instrumented build (`-fprofile-instr-generate` on the generated code
 and the runtime; `LLVM_PROFILE_FILE` with `%c`, continuous mode, because `plat_exit` skips the exit handlers that
@@ -573,9 +583,9 @@ In the order it is likely to pay off:
    Include a `TOTK_AUDIO_DUMP` where the game uses reverb (a cave, a shrine) to check the frame seams.
 2. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
    `TOTK_ASTC=cpu`.
-3. **`ub_overlay` on this Mac.** Measure Great Sky Island with upstream's overlays against `ub_overlay=0` and against
-   the 33-37 fps of the earlier `TOTK_UB_PATCH` ([Frame rate](#frame-rate)), check the map and the menus, and take a
-   new Metal System Trace to count the encoders a frame now.
+3. **Two depth-only pipelines MoltenVK refuses** ([Frame rate](#frame-rate)). Log the vertex attribute formats with
+   the failure and get MoltenVK's own message (`MVK_CONFIG_LOG_LEVEL=2`, which goes to the terminal, not `totk.log`).
+   Then an interleaved run against `ub_overlay=0` and a new Metal System Trace to count the encoders a frame now.
 4. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
    `tools/prepare_shaders.py` build pipelines at install time.
 5. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
