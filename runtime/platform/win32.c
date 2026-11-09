@@ -642,6 +642,15 @@ int64_t plat_file_size(const char *path) {
     return (int64_t)(((uint64_t)d.nFileSizeHigh << 32) | d.nFileSizeLow);
 }
 
+// FILETIME counts 100 ns from 1601; 11644473600 s lie between 1601 and 1970.
+int64_t plat_file_mtime(const char *path) {
+    wchar_t w[WPATH];
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (!widen(path, w, WPATH) || !GetFileAttributesExW(w, GetFileExInfoStandard, &d)) return -1;
+    uint64_t t = (uint64_t)d.ftLastWriteTime.dwHighDateTime << 32 | d.ftLastWriteTime.dwLowDateTime;
+    return ((int64_t)t - 116444736000000000ll) * 100;
+}
+
 int plat_file_set_readonly(const char *path, int on) {
     wchar_t w[WPATH];
     if (!widen(path, w, WPATH)) return 0;
@@ -1018,6 +1027,12 @@ void plat_exit(int code) {
 int plat_setenv(const char *name, const char *value) { return _putenv_s(name, value ? value : "") == 0; }
 
 uint32_t plat_process_id(void) { return GetCurrentProcessId(); }
+
+// The NetBIOS name ("DESKTOP-AB12CD"), as Windows shows it in Settings > System > About.
+int plat_host_name(char *out, size_t cap) {
+    DWORD n = (DWORD)cap;
+    return cap && GetComputerNameA(out, &n) && n;
+}
 
 static uint64_t ft64(FILETIME f) { return (uint64_t)f.dwHighDateTime << 32 | f.dwLowDateTime; }
 

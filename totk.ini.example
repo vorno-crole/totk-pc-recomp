@@ -407,6 +407,17 @@
 # textures at a quarter of it.
 # tex_heap_extra_mb = 0
 
+[saves]
+# Save sync: one save on several computers, through a folder that Dropbox, OneDrive, iCloud Drive or the like keeps the
+# same on each of them. Set the same folder on every computer (~ is your home folder); the save goes into its
+# "Tears of the Kingdom" subfolder. MacNativeGames' Mac port uses the same format: choose the same folder there with
+# Save Sync > Choose Sync Folder. At start the game takes the folder's save when another computer saved since; after
+# each save it puts its own there, a few seconds later and again when you quit. Play on one computer at a time: a game
+# that is still running when another computer saves keeps its later saves to itself, and its next start takes the
+# other computer's save. A local save that is replaced is kept in the profile's cloud-backups folder (the newest 10),
+# and the log's "save sync:" lines say what happened. Read at start. Default: off.
+# save_sync = ~/Dropbox/Games
+
 [files]
 # Developer overlay: a folder with RomFS files and a manifest.tsv (tools/make_romfs_patches.py format). Players put
 # their mods into the mods folder instead ([mods]). Default: none.

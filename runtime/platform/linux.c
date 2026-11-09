@@ -782,6 +782,11 @@ int64_t plat_file_size(const char *path) {
     return stat(path, &st) ? -1 : (int64_t)st.st_size;
 }
 
+int64_t plat_file_mtime(const char *path) {
+    struct stat st;
+    return stat(path, &st) ? -1 : (int64_t)st.st_mtim.tv_sec * 1000000000 + st.st_mtim.tv_nsec;
+}
+
 // The owner's write permission stands for Windows' read-only attribute.
 int plat_file_set_readonly(const char *path, int on) {
     struct stat st;
@@ -1319,6 +1324,12 @@ int plat_setenv(const char *name, const char *value) {
 }
 
 uint32_t plat_process_id(void) { return (uint32_t)getpid(); }
+
+int plat_host_name(char *out, size_t cap) {
+    if (!cap || gethostname(out, cap)) return 0;
+    out[cap - 1] = 0;
+    return *out != 0;
+}
 
 uint64_t plat_process_cpu_ns(void) {
     struct timespec t;
