@@ -268,6 +268,7 @@ void plat_aligned_free(void *p);
 _Noreturn void plat_exit(int code);       // ends the process at once: other threads stop, no atexit handlers run
 int plat_setenv(const char *name, const char *value);    // value NULL removes it; 1 on success
 uint32_t plat_process_id(void);
+int plat_host_name(char *out, size_t cap);   // this computer's network name, NUL-terminated; 0 when unknown
 // CPU time of the process since it started (user and kernel), and wall time since it started, in ns; 0 when unknown.
 uint64_t plat_process_cpu_ns(void);
 uint64_t plat_process_uptime_ns(void);
@@ -311,6 +312,7 @@ static inline int64_t plat_ftell64(FILE *f) { return (int64_t)ftello(f); }
 void plat_file_delete(const char *path);
 int plat_file_truncate(const char *path, uint64_t size);  // 1 on success
 int64_t plat_file_size(const char *path);                 // bytes of a file, -1 when missing or unreadable
+int64_t plat_file_mtime(const char *path);                // last write, ns since 1970; -1 when missing or unreadable
 int plat_file_set_readonly(const char *path, int on);     // sets or clears the read-only attribute; 1 on success
 // A file that only grows and other processes may read meanwhile: each write lands whole at its end, from any thread,
 // and reaches the file even if the process dies right after (no user-space buffer, no flush to the disk).

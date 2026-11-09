@@ -283,7 +283,10 @@ files); a change to the settings passes `totk.exe --probe-cfg` and `python tests
 when a setting is described neither in `totk.ini.example` nor in [settings.md](settings.md). A change to the mods' ExeFS patches
 (`tools/exefs_patches.py`, `runtime/mods.c`, the `folded.txt` of `recomp/gen.py`) passes
 `.venv\Scripts\python tests\exefs_patches_test.py`, which makes its own modules and runs `gen.py` on one with a jump
-table (no game files), and `totk.exe --probe-mods`.
+table (no game files), and `totk.exe --probe-mods`. A change to the save sync (`runtime/save_sync.c`) passes
+`totk.exe --probe-save-sync`, two computers sharing a folder, and `.venv\Scripts\python tests\save_sync_check.py --exe
+build\<ver>\totk.exe`, which checks the folder it leaves as MacNativeGames' `cloud_save.m` reads it (no game files);
+the save commit around it passes `totk.exe --probe-fs`.
 
 The lifter (`recomp/`) and the CPU headers (`runtime/cpu.h`, `runtime/simd.h`) are checked against Unicorn. Every lifter
 change passes these, all run with `.venv`:

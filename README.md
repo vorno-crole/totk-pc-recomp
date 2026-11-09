@@ -45,6 +45,7 @@ The findings, measurements and work left are in [docs/macos.md](docs/macos.md).
 - Anisotropic texture filtering up to 16x, for sharp ground into the distance
 - In-game settings menu (F1) and performance overlay (F10)
 - Play time across runs on the Game tab of the settings menu, kept in `playtime.txt` next to the saves
+- Save sync between computers through a Dropbox, OneDrive or iCloud Drive folder, in the format of MacNativeGames' Mac port so the two share one save (`save_sync` in `totk.ini`)
 - Discord Rich Presence ("Playing TotK Recomp" with the play time), off by default, own application id supported
 - Setup and in-game menu in English, Russian, Brazilian Portuguese and Simplified Chinese
 - Keyboard, mouse and gamepad with remapping, rumble and gyro

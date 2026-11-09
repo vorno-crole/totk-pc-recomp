@@ -282,10 +282,12 @@ static int same_file(const char *a, const char *b) {
 }
 
 // Copy the tree src to dst, which must not exist; links are skipped. durable: every file is flushed, and every
-// directory as far as the file system allows. base (or NULL): the committed save; a file whose bytes equal base's file
+// directory as far as the file system allows; DURABLE_COMMIT also counts the probe's crash points (crashed), which
+// only a Commit's own copy may do. base (or NULL): the committed save; a file whose bytes equal base's file
 // at the same path becomes a hard link to it instead of a copy (*nlinked), as committed files are never written in
 // place (the game writes the working copy). A save commit then writes the 3-4 files of the slot the game saved instead
 // of all 82 (300-380 ms of flushes on the game thread). 0 on success.
+enum { DURABLE_FLUSH = 1, DURABLE_COMMIT };
 static int copy_tree(const char *src, const char *dst, const char *base, int durable, int *nfiles, int *nlinked,
                      uint64_t *bytes) {
     if (plat_fs_mkdir(dst)) return -1;
@@ -302,7 +304,7 @@ static int copy_tree(const char *src, const char *dst, const char *base, int dur
             if (b && same_file(s, b) && !plat_fs_link(b, d)) bad = 0, ++*nlinked;
             else bad = copy_file(s, d, durable, bytes);
             *nfiles += !bad;
-            if (!bad && durable && crashed()) bad = -1;
+            if (!bad && durable == DURABLE_COMMIT && crashed()) bad = -1;
         }
         free(s);
         free(d);
@@ -509,7 +511,7 @@ static uint32_t save_commit_locked(void) {
     int nfiles = 0, linked = 0;
     tx_step = tx_dead = 0;
     const char *base = exists(newest_save()) ? newest_save() : NULL;
-    if (remove_tree(new_root) || copy_tree(work_root, new_root, base, 1, &nfiles, &linked, &bytes)) {
+    if (remove_tree(new_root) || copy_tree(work_root, new_root, base, DURABLE_COMMIT, &nfiles, &linked, &bytes)) {
         if (tx_dead) return FS_R_INVALID_ARGUMENT;
         rt_log("fs: save commit: copying the working copy failed; the newest save is unchanged");
         remove_tree(new_root);
@@ -556,7 +558,10 @@ static void save_wait_commit(void) {
     plat_mutex_unlock(&pend_lock);
 }
 
-void fs_save_flush(void) { save_wait_commit(); }
+void fs_save_flush(void) {
+    save_wait_commit();
+    save_sync_quit();   // the last save to the sync folder, now that no Commit runs
+}
 
 static uint32_t commit_run(void) {
     plat_mutex_lock(&tx_lock);
@@ -567,8 +572,46 @@ static uint32_t commit_run(void) {
     commit_pending = 0;
     plat_mutex_unlock(&pend_lock);
     plat_cond_broadcast(&pend_cv);
+    if (!r) save_sync_changed();   // a complete save: to the sync folder once the game is quiet (save_sync.c)
     return r;
 }
+
+// ---- for save_sync.c
+// A tree of hard links to the newest save at dst (copies where the file system has no hard links), taken under
+// tx_lock so no Commit swaps the save out halfway. Committed files are never written in place, so the links keep the
+// bytes of this moment while save_sync.c hashes and uploads them. 0 on success.
+static int link_tree(const char *src, const char *dst) {
+    if (plat_fs_mkdir(dst)) return -1;
+    Listing l;
+    if (list_dir(src, &l)) return -1;
+    int bad = 0;
+    for (int i = 0; i < l.n && !bad; i++) {
+        if (l.e[i].kind == PLAT_FS_LINK) continue;
+        char *s = join(src, l.e[i].name), *d = join(dst, l.e[i].name);
+        uint64_t bytes = 0;
+        if (l.e[i].kind == PLAT_FS_DIR) bad = link_tree(s, d);
+        else bad = plat_fs_link(s, d) && copy_file(s, d, 0, &bytes);
+        free(s);
+        free(d);
+    }
+    listing_free(l.e, l.n);
+    return bad;
+}
+
+static int save_snapshot(const char *dst) {
+    plat_mutex_lock(&tx_lock);
+    int r = link_tree(newest_save(), dst);
+    plat_mutex_unlock(&tx_lock);
+    return r;
+}
+
+int fs_tree_copy(const char *src, const char *dst) {
+    int n = 0, linked = 0;
+    uint64_t bytes = 0;
+    return copy_tree(src, dst, NULL, DURABLE_FLUSH, &n, &linked, &bytes);
+}
+
+int fs_tree_remove(const char *path) { return remove_tree_retry(path); }
 
 static void commit_main(void *arg) {
     (void)arg;
@@ -614,6 +657,7 @@ static void storage_init(void *param) {
     snprintf(old_root, sizeof old_root, "%s/old", tx_root);
     save_recover();   // before save_root is created: an absent save_root means a commit to complete
     make_dirs(save_root);
+    save_sync_start(save_root, profile, save_snapshot, *ready_root != 0);   // before the game reads its save
     snprintf(p, sizeof p, "%s/temp", profile);
     remove_tree(p);
     make_dirs(p);

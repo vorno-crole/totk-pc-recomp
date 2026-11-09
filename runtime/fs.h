@@ -56,5 +56,16 @@ void fs_host_set_profile(const char *dir);                 // profile directory;
                                                            // (default rt_config()->profile)
 int fs_save_busy(void);                                    // a save is being written: a save file open for writing,
                                                            // or save data changed in the last 3 s and not committed
-void fs_save_flush(void);                                  // wait for a save Commit still running in the background;
-                                                           // every exit path calls it before the process ends
+void fs_save_flush(void);                                  // wait for a save Commit still running in the background
+                                                           // and upload to the sync folder; every exit path calls it
+                                                           // before the process ends
+int fs_tree_copy(const char *src, const char *dst);        // copy a folder tree to dst (absent), files flushed; 0 ok
+int fs_tree_remove(const char *path);                      // delete a folder tree, retried 2 s; 0 also when absent
+
+// ---- save_sync.c: the save shared with other computers through a folder (totk.ini save_sync)
+// At start, after save recovery and before the game reads its save: the folder's save replaces save_dir when another
+// computer uploaded since. snapshot(dst) makes a stable copy of the newest save at dst (0 on success); local_waits: a
+// finished commit could not be swapped in, so save_dir is not the newest save and this start downloads nothing.
+void save_sync_start(const char *save_dir, const char *profile, int (*snapshot)(const char *dst), int local_waits);
+void save_sync_changed(void);                              // a Commit finished: upload once the game is quiet
+void save_sync_quit(void);                                 // at exit: upload what is still waiting
