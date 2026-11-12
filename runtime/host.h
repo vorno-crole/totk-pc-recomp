@@ -357,6 +357,9 @@ void playtime_save(void);                                  // playtime.c: writes
 int playtime_get(uint64_t *total_s, uint64_t *session_s); // playtime.c: all runs and this one; 0 without a profile
 int probe_playtime(void);                                  // playtime.c: the file, the ticks and the save
 int probe_save_sync(void);                                 // save_sync.c: two computers sharing a sync folder
+// save_sync.c: this run is the game (main.c, no --mode). Only the game uses totk.ini's save_sync folder; a probe uses one
+// only when TOTK_SAVE_SYNC is set in its environment, so a test run never uploads its test saves over the player's.
+void save_sync_game_run(void);
 int probe_discord(void);                                   // discord_rpc.c
 int probe_loader(void), probe_kernel(void), probe_ipc(void), probe_services(void), probe_fs(void);
 int probe_gfx_abi(void);                                   // gfx_abi_probe.c

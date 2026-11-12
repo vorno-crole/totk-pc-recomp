@@ -642,8 +642,14 @@ static void start_sync(void) {
     }
 }
 
-// The setting's folder with a leading ~ for the home folder, plus GAME_NAME.
+static int game_run;
+void save_sync_game_run(void) { game_run = 1; }
+
+// The setting's folder with a leading ~ for the home folder, plus GAME_NAME. Outside the game (a --probe run) only a
+// folder given in the environment counts: --probe-fs commits test saves, which would otherwise reach the player's
+// sync folder through totk.ini and go to the other computers as a new generation.
 static int sync_root(char *out, size_t cap) {
+    if (!game_run && !cfg_from_env("TOTK_SAVE_SYNC")) return 0;
     const char *v = cfg_get("TOTK_SAVE_SYNC");
     if (!v || !*v || !strcmp(v, "0")) return 0;
     const char *home = getenv("HOME");
