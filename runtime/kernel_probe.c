@@ -796,8 +796,15 @@ static void test_crash_report(void) {
     int code = plat_run_self(CRASH_CHILD_ENV, "1", out, sizeof out, 30000);
     CHECK(code == 71 && strstr(out, "FATAL: access violation") && strstr(out, "reading address 0x10"),
           "crash child: exit code %d, no access violation at 0x10 reported", code);
-    snprintf(want, sizeof want, "rbx %016llx", (unsigned long long)(uintptr_t)&crash_host_words[2]);
-    CHECK(strstr(out, want), "crash report: no host register line with %s", want);
+    // The child's rbx is its own address of crash_host_words[2]. Where the executable loads at another address in each
+    // process (macOS and Linux position-independent builds), the two agree only as offsets from the executable's base,
+    // which the FATAL line gives as "at host <rip> (totk+<offset>)".
+    unsigned long long rip = 0, rip_off = 0, rbx = 0;
+    const char *at = strstr(out, " at host 0x"), *rb = strstr(out, "rbx ");
+    int parsed = at && sscanf(at, " at host 0x%llx (totk+0x%llx)", &rip, &rip_off) == 2 && rb && sscanf(rb, "rbx %llx", &rbx) == 1;
+    uint64_t want_off = (uint64_t)(uintptr_t)&crash_host_words[2] - (uint64_t)plat_exe_base();
+    snprintf(want, sizeof want, "rbx at totk+%#llx", (unsigned long long)want_off);
+    CHECK(parsed && rbx - (rip - rip_off) == want_off, "crash report: no host register line with %s", want);
     CHECK(report_line(out, "host code at rip-", line, sizeof line) && strstr(line, "| 48 8b 04 25 10 00 00 00"),
           "crash report: the faulting instruction's bytes are missing");
     const char *h = report_line(out, "*5ca1ab1e0c0de001", line, sizeof line);
