@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "host.h"
+#include "platform/platform.h"
 #include "vk.h"
 
 // Bytes of an attribute format, by VkFormat ranges: only vk_vertex_format's formats reach this.
@@ -106,7 +107,7 @@ static void drop(Copy *c) {
     memset(c, 0, sizeof *c);
 }
 
-int vk_valign_buffer(uint64_t addr, uint64_t size, const VkValign *v, VkBuffer *buf, VkDeviceSize *bytes) {
+static int buffer_locked(uint64_t addr, uint64_t size, const VkValign *v, VkBuffer *buf, VkDeviceSize *bytes) {
     VkCtx *ctx = vk_ctx();
     uint64_t verts = size / v->stride_in, h = layout_hash(v);
     if (!verts) return 0;
@@ -154,11 +155,24 @@ hit:
     return 1;
 }
 
+// The table is shared by every recording thread: with replay workers on (TOTK_REPLAY_WORKERS, the menu's "GPU frame
+// prep threads") several bind vertex streams at once.
+static PlatMutex lock = PLAT_MUTEX_INIT;
+
+int vk_valign_buffer(uint64_t addr, uint64_t size, const VkValign *v, VkBuffer *buf, VkDeviceSize *bytes) {
+    plat_mutex_lock(&lock);
+    int r = buffer_locked(addr, size, v, buf, bytes);
+    plat_mutex_unlock(&lock);
+    return r;
+}
+
 void vk_valign_shutdown(void) {
     VkCtx *ctx = vk_ctx();
+    plat_mutex_lock(&lock);
     for (uint32_t i = 0; ctx && i < CACHE_SLOTS; i++)
         if (cache[i].buf) vmaDestroyBuffer(ctx->vma, cache[i].buf, cache[i].alloc);
     memset(cache, 0, sizeof cache);
     ncache = 0;
+    plat_mutex_unlock(&lock);
 }
 #endif

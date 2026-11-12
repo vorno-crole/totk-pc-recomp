@@ -339,6 +339,15 @@ uint64_t plat_counter_hz(void) { return 1000000000u; }
 
 void plat_timer_1ms(void) {}   // timed waits are already that fine here
 
+// No power throttling to opt out of and no hybrid CPU on an Intel Mac, as on Linux.
+int plat_power_full(void) { return -1; }
+
+int plat_perf_core_setup(char *why, size_t n) {
+    snprintf(why, n, "not done on macOS");
+    return 0;
+}
+int plat_thread_perf_core(void) { return -1; }
+
 // The sleep ends PLAT_SPIN_NS early and the rest is spent yielding, so the deadline is met closely, as on Windows.
 #define PLAT_SPIN_NS 100000u
 
@@ -968,6 +977,11 @@ static void fault_handler(int sig, siginfo_t *si, void *uc) {
             c.module = n ? n + 1 : info.dli_fname;
         }
         if (mem) c.access = (err & 16) ? 8 : (err & 2) ? 1 : 0, c.addr = at;
+        const __typeof__(u->uc_mcontext->__ss) *r = &u->uc_mcontext->__ss;
+        const uint64_t gr[16] = {r->__rax, r->__rcx, r->__rdx, r->__rbx, r->__rsp, r->__rbp, r->__rsi, r->__rdi,
+                                 r->__r8,  r->__r9,  r->__r10, r->__r11, r->__r12, r->__r13, r->__r14, r->__r15};
+        memcpy(c.gpr, gr, sizeof gr);
+        c.has_regs = 1;
         crash_fn(&c);   // logs and exits
     }
     signal(sig, SIG_DFL);   // returns into the faulting instruction, which faults again with the default action
@@ -1484,6 +1498,45 @@ int plat_open_folder(const char *path) {
 // ---- dynamic libraries
 
 void *plat_lib_open(const char *name) { return dlopen(name, RTLD_NOW | RTLD_LOCAL); }
+
+void plat_lib_error(char *out, size_t cap) {
+    const char *e = dlerror();
+    snprintf(out, cap, "%s", e ? e : "unknown error");
+}
+
+// NVIDIA's NGX (DLAA, DLSS) has no macOS driver.
+int plat_ngx_core_path(char *out, size_t cap) {
+    (void)out, (void)cap;
+    return 0;
+}
+
+// UTF-8 to UTF-32 wchar_t, as linux.c, without the C library's locale (the runtime never sets one, so mbstowcs would
+// stop at the first non-ASCII byte). Returns 0 on malformed input or when out has no room.
+static int utf8_to_wide(const char *in, wchar_t *out, size_t cap) {
+    const unsigned char *u = (const unsigned char *)in;
+    size_t n = 0;
+    while (*u) {
+        unsigned c = *u++, more = c < 0x80 ? 0 : c >= 0xF0 ? 3 : c >= 0xE0 ? 2 : c >= 0xC0 ? 1 : 4;
+        if (more == 4) return 0;
+        if (more) c &= 0x3F >> more;
+        for (unsigned k = 0; k < more; k++, u++) {
+            if ((*u & 0xC0) != 0x80) return 0;
+            c = c << 6 | (*u & 0x3F);
+        }
+        if (n + 1 >= cap) return 0;
+        out[n++] = (wchar_t)c;
+    }
+    out[n] = 0;
+    return 1;
+}
+
+int plat_exe_dir_wide(wchar_t *out, size_t cap) {
+    char dir[PLAT_PATH_MAX];
+    char *cut = plat_exe_path(dir, sizeof dir) ? plat_last_sep(dir) : NULL;
+    if (!cut) return 0;
+    cut[1] = 0;
+    return utf8_to_wide(dir, out, cap);
+}
 void *plat_lib_sym(void *lib, const char *name) { return lib ? dlsym(lib, name) : NULL; }
 
 // ---- machine load: Mach host and task statistics. The GPU and the CPU temperature have no public source here, so they
@@ -1624,6 +1677,16 @@ void plat_commit_info(double *proc_mb, double *used_mb, double *limit_mb) {
     uint64_t resident, private_bytes;
     plat_process_memory(&resident, &private_bytes);
     if (private_bytes) *proc_mb = (double)(private_bytes >> 20);
+}
+
+// No commit limit (macOS compresses and swaps, as Linux overcommits); the physical room is the free and inactive pages,
+// what plat_mem_info counts as not used.
+void plat_mem_room(uint64_t *commit_room, uint64_t *phys_room) {
+    *commit_room = *phys_room = UINT64_MAX;
+    vm_statistics64_data_t v;
+    mach_msg_type_number_t c = HOST_VM_INFO64_COUNT;
+    if (host_statistics64(mach_host_self(), HOST_VM_INFO64, (host_info64_t)&v, &c) == KERN_SUCCESS)
+        *phys_room = ((uint64_t)v.free_count + v.inactive_count) * (uint64_t)vm_kernel_page_size;
 }
 
 // ---- child processes
