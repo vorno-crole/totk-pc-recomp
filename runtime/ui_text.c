@@ -285,6 +285,8 @@ static const char *const text_en[UI_TEXT_COUNT] = {
     [UI_MENU_MENU_CURSOR_DESC] = "In the game's own menus (title, inventory, shops, dialogue choices) the pointer shows: the item under it is selected, left click confirms, right click goes back. Only after the mouse or a key was used last, so a gamepad sees the menus unchanged (game 1.4.3).",
     [UI_MENU_MOUSE_SENS] = "Mouse camera sensitivity",
     [UI_MENU_MOUSE_SENS_DESC] = "How fast the mouse turns the camera.",
+    [UI_MENU_MOUSE_CAPTURE] = "Capture the mouse",
+    [UI_MENU_MOUSE_CAPTURE_DESC] = "On (the default), the window takes the mouse for the camera while it is in front. Off, the pointer stays free to use other windows and displays, the mouse does not turn the camera, and a controller keeps working while another window is in front.",
     [UI_MENU_WALK_KEY] = "Walk key",
     [UI_MENU_WALK_KEY_DESC] = "Hold it to tilt the keyboard's sticks part of the way, so the keyboard walks instead of "
                               "runs. The walk scale sets how far. A controller and the mouse are not affected.",
@@ -765,6 +767,8 @@ static const char *const text_ru[UI_TEXT_COUNT] = {
     [UI_MENU_MENU_CURSOR_DESC] = "В меню самой игры (заставка, инвентарь, магазины, варианты ответа) появляется указатель: пункт под ним выбирается, левый щелчок подтверждает, правый возвращает назад. Только если последними использовались мышь или клавиатура, поэтому с геймпадом меню не меняются (версия игры 1.4.3).",
     [UI_MENU_MOUSE_SENS] = "Чувствительность мыши",
     [UI_MENU_MOUSE_SENS_DESC] = "Как быстро мышь поворачивает камеру.",
+    [UI_MENU_MOUSE_CAPTURE] = "Захват мыши",
+    [UI_MENU_MOUSE_CAPTURE_DESC] = "Включено (по умолчанию): пока окно впереди, оно забирает мышь для камеры. Выключено: указатель свободен для других окон и мониторов, мышь не поворачивает камеру, а контроллер работает, даже когда впереди другое окно.",
     [UI_MENU_WALK_KEY] = "Клавиша шага",
     [UI_MENU_WALK_KEY_DESC] = "Удерживайте: стики клавиатуры отклоняются частично, и персонаж идёт, а не бежит. "
                               "Насколько — задаёт сила шага. Контроллер и мышь не затрагиваются.",
@@ -1152,6 +1156,8 @@ static const char *const text_pt_br[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_NOW] = "analógico agora: %.0f %%",
     [UI_MENU_MOUSE_SENS] = "Sensibilidade da câmera no mouse",
     [UI_MENU_MOUSE_SENS_DESC] = "Quão rápido o mouse gira a câmera.",
+    [UI_MENU_MOUSE_CAPTURE] = "Capturar o mouse",
+    [UI_MENU_MOUSE_CAPTURE_DESC] = "Ligado (o padrão), a janela prende o mouse para a câmera enquanto está na frente. Desligado, o ponteiro fica livre para outras janelas e monitores, o mouse não gira a câmera e o controle continua funcionando com outra janela na frente.",
 
     [UI_BINDS_HELP] = "Selecione uma célula e aperte A ou Enter, depois a tecla, o botão do mouse ou o botão do "
                       "controle. Delete ou X limpa a célula. Uma tecla já em uso vem para cá; um botão do controle "
@@ -1710,6 +1716,8 @@ static const char *const text_zh_hans[UI_TEXT_COUNT] = {
     [UI_MENU_STICK_DEADZONE_NOW] = "当前摇杆：%.0f %%",
     [UI_MENU_MOUSE_SENS] = "鼠标视角灵敏度",
     [UI_MENU_MOUSE_SENS_DESC] = "鼠标转动视角的速度。",
+    [UI_MENU_MOUSE_CAPTURE] = "捕获鼠标",
+    [UI_MENU_MOUSE_CAPTURE_DESC] = "开启（默认）时，窗口在前台会占用鼠标来转动视角。关闭时，指针可自由用于其他窗口和显示器，鼠标不再转动视角，其他窗口在前台时手柄仍可使用。",
 
     [UI_BINDS_HELP] = "选中一个格子后按 A 或 Enter，再按键、鼠标键或手柄按键。"
                       "Delete 或 X 清除格子。已占用的按键会移到这里；"

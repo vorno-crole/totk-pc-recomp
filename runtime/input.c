@@ -273,6 +273,31 @@ static float mouse_sens_get(void) {
     return mouse_sens;
 }
 
+// TOTK_MOUSE_CAPTURE (live, cfg_version): 1, the default, captures the cursor for the mouse camera as described at
+// input_cursor_allowed. 0 never captures it, so the pointer stays free to leave the window for another display, and the
+// gamepad keeps working while another window has the focus: play with a controller and use the mouse elsewhere. SDL
+// drops gamepad presses while it has a window and none of its windows has the keyboard focus, unless
+// SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS is set (SDL, src/joystick/SDL_joystick.c,
+// SDL_PrivateJoystickShouldIgnoreEvent); the hint is read through a callback, so it can change while the game runs.
+// The Win32 window is not SDL's, so there SDL never drops them and the hint changes nothing. With 1 the hint goes back
+// to SDL's default, or to the environment's SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS if one is set.
+static int mouse_capture = -1;
+static unsigned mouse_capture_seen;
+
+static int mouse_capture_get(void) {
+    unsigned ver = cfg_version();
+    if (mouse_capture >= 0 && ver == mouse_capture_seen) return mouse_capture;
+    mouse_capture_seen = ver;
+    int on = atoi(cfg_value("TOTK_MOUSE_CAPTURE")) != 0;
+    if (on != mouse_capture) {
+        if (on) SDL_ResetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS);
+        else SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        if (mouse_capture >= 0 || !on) rt_log("input: cursor capture %s", on ? "on" : "off, gamepad works out of focus");
+    }
+    mouse_capture = on;
+    return on;
+}
+
 
 // ---- walk key: the keyboard's stick samples scaled down while a key is held (TOTK_WALK_KEY, TOTK_WALK_SCALE)
 // A keyboard key is all or nothing, so every keyboard-driven stick sample is +/-32767 and the game only ever sees a
@@ -617,6 +642,7 @@ static void poll_merged(uint64_t *buttons, int32_t *lx, int32_t *ly, int32_t *rx
     if (!state) start();
     if (state > 0) {
         binds_refresh();
+        mouse_capture_get();   // a change from the Controls tab sets the gamepad's focus hint before this read
         if (state == 1) pad_read(&b, sl, sr);
         int pad_used = b || abs(sl[0]) > PAD_USED || abs(sl[1]) > PAD_USED || abs(sr[0]) > PAD_USED ||
                        abs(sr[1]) > PAD_USED, kbm_used = 0;
@@ -710,7 +736,8 @@ static volatile uint64_t g_block_closed, g_menu_closed;
 
 int input_cursor_allowed(void) {
     const char *in = cfg_get("TOTK_INPUT");
-    return g_block != 1 && g_menu != 1 && mouse_sens_get() > 0 && !(in && !strcmp(in, "none")) && !menu_cursor_pointer();
+    return g_block != 1 && g_menu != 1 && mouse_sens_get() > 0 && mouse_capture_get() && !(in && !strcmp(in, "none")) &&
+           !menu_cursor_pointer();
 }
 
 void input_block(int on) {

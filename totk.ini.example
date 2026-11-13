@@ -354,6 +354,10 @@
 # Mouse camera sensitivity (0 to 10; 0 = no mouse camera and no cursor capture). With mouse_mode = direct, 1 turns the
 # camera 0.08 degrees per count, the same in every camera mode (about 14.3 cm a turn at 800 DPI).
 # mouse_sens = 1
+# 0 never captures the cursor: the pointer stays free to leave the window for another display, the mouse does not turn
+# the camera, and a gamepad keeps working while another window has the focus, to play with a controller and use the
+# mouse elsewhere. 1 (default) captures it while the window is in front. Changes while the game runs.
+# mouse_capture = 1
 # The mouse's camera motion times this while the bow is drawn (0.1 to 3; mouse_mode = direct, game 1.4.3), on top of
 # the 0.08 degrees per count every camera turns, the bow's included. Changes while the game runs.
 # mouse_aim_scale = 1
