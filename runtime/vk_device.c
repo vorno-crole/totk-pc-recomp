@@ -77,12 +77,28 @@ static void ab_report(uint64_t addr, uint64_t precision) {
                        (unsigned long long)n);
 }
 
+// MoltenVK sends each error it raises to the instance's messengers as a validation-type message, whatever
+// MVK_CONFIG_LOG_LEVEL says (MoltenVK, MVKBaseObject.mm reportMessage and MVKInstance.mm): among them what Metal said
+// when it refused a translated shader or a pipeline, which vkCreateGraphicsPipelines only returns as -3. Its copy on
+// stderr is lost when the game starts from a launcher, so on macOS the messenger takes those errors without the
+// validation layer as well, and they go to the log ("vk driver error") without counting as validation errors.
+#ifdef __APPLE__
+#define DRIVER_ERRORS 1
+#else
+#define DRIVER_ERRORS 0
+#endif
+
 static VKAPI_ATTR VkBool32 VKAPI_CALL debug_cb(VkDebugUtilsMessageSeverityFlagBitsEXT sev, VkDebugUtilsMessageTypeFlagsEXT type,
                                                const VkDebugUtilsMessengerCallbackDataEXT *d, void *user) {
     (void)user;
     if (type & VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT) { ab_record(d); return VK_FALSE; }
     if (sev < VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) return VK_FALSE;   // info, asked for the address events
     int err = (sev & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0;
+    if (!g_vk.validation) {   // no layer: the driver's own errors (DRIVER_ERRORS)
+        static volatile int32_t driver_logged;
+        if (err && plat_inc32(&driver_logged) <= 200) rt_log("vk driver error: %s", d->pMessage);
+        return VK_FALSE;
+    }
     if (err) plat_inc32(&g_vk.validation_errors);
     static volatile int32_t logged;
     if (plat_inc32(&logged) <= 500) rt_log("vk validation %s: %s", err ? "error" : "warning", d->pMessage);
@@ -174,7 +190,8 @@ static int create_instance(void) {
     const char *ar = cfg_get("TOTK_ADDR_REPORT");
     ab_want = !(ar && !strcmp(ar, "0")) && instance_ext_present(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     if (ab_want && !ab_ring && !(ab_ring = calloc(AB_N, sizeof *ab_ring))) ab_want = 0;
-    if (validate || ab_want) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    int driver_errors = DRIVER_ERRORS && instance_ext_present(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (validate || ab_want || driver_errors) ext[n_ext++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     if (vk_hdr_wanted() && instance_ext_present(VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME))   // HDR10 surface formats
         ext[n_ext++] = VK_EXT_SWAPCHAIN_COLOR_SPACE_EXTENSION_NAME;
     vk_dlaa_instance_exts(ext, &n_ext, 12);
@@ -190,7 +207,7 @@ static int create_instance(void) {
     VkResult r = vkCreateInstance(&ci, NULL, &g_vk.instance);
     if (r != VK_SUCCESS) { rt_log("vk: vkCreateInstance failed (%d); is a Vulkan 1.3 driver installed?", (int)r); return 0; }
     g_vk.validation = validate;
-    if (validate || ab_want) {
+    if (validate || ab_want || driver_errors) {
         PFN_vkCreateDebugUtilsMessengerEXT f =
             (PFN_vkCreateDebugUtilsMessengerEXT)vkGetInstanceProcAddr(g_vk.instance, "vkCreateDebugUtilsMessengerEXT");
         VkDebugUtilsMessengerCreateInfoEXT mi = {
@@ -199,6 +216,7 @@ static int create_instance(void) {
                                (ab_want ? VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT : 0),
             .messageType = (validate ? VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
                                        VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT : 0) |
+                           (driver_errors ? VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT : 0) |
                            (ab_want ? VK_DEBUG_UTILS_MESSAGE_TYPE_DEVICE_ADDRESS_BINDING_BIT_EXT : 0),
             .pfnUserCallback = debug_cb};
         if (!f || f(g_vk.instance, &mi, NULL, &g_vk.messenger) != VK_SUCCESS) ab_want = 0;

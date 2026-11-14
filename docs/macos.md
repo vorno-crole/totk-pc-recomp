@@ -496,10 +496,20 @@ interleaved comparison, but nothing was lost by taking upstream's version.
 
 Two pipelines failed in that hour, both depth-only (no colour target, `D16_UNORM`, triangles), with `-3`
 (`VK_ERROR_INITIALIZATION_FAILED`) from MoltenVK: vertex shaders `80896ea6afda6580` and `9939bf5180be64a6`, fragment
-shaders `6b102e6094e75417` and `3a664940fb78f69d`. The four modules pass `spirv-val`, the vertex shaders use no subgroup
-operations, the fragment inputs match the vertex outputs, and the interlock capability they declare is declared by
-every fragment shader in the cache. Both vertex shaders read a `uint4` attribute at location 6; Metal refuses a
-pipeline whose vertex format cannot be read as the shader's type, which the failure line does not show yet.
+shaders `6b102e6094e75417` and `3a664940fb78f69d`; later sessions added `549097b372dca941` with the second fragment
+shader. Their draws were skipped, and the failure came back in every session, since a failed pipeline is not
+recorded. The `uint4` vertex attribute at location 6 they share was a false lead. Converted offline with SPIRV-Cross
+(the converter MoltenVK uses) and built on this GPU with `newRenderPipelineStateWithDescriptor`, each vertex shader
+builds alone, and both fragment shaders crash Apple's Metal compiler for AMD GPUs ("Compiler encountered an internal
+error"), in fast and safe math, with or without a colour target. They are alpha tests, a chain of up to seven
+`discard_fragment()` calls followed by a dither. SPIRV-Cross writes OpKill as `discard_fragment();` alone, and the
+structured code falls through to what follows. Without any one of the discards involved the shader builds; with
+`return out;` after each one, both build. `vk_pipeline.c` `create_graphics` now retries a pipeline MoltenVK refuses
+once on macOS, with `spirv_kill_return` turning each OpKill of its fragment shader into OpDemoteToHelperInvocation
+and OpReturn, which SPIRV-Cross writes as exactly that; a demoted invocation that returns at once writes nothing, as a
+killed one. Only refused pipelines change, so the pipeline cache stays valid. On macOS the debug messenger now takes
+MoltenVK's own errors too (`vk driver error` lines), and the failure line lists the vertex attributes. In play the
+compiler crashed on 3a664940fb78f69d once and the retry built the pipeline; no pipeline failed in that session.
 
 Profile-guided optimisation does not help yet. An instrumented build (`-fprofile-instr-generate` on the generated code
 and the runtime; `LLVM_PROFILE_FILE` with `%c`, continuous mode, because `plat_exit` skips the exit handlers that
@@ -548,7 +558,9 @@ display with the menu bar. A display above 60 Hz paces a 60 fps limit unevenly: 
 | `--probe-window` | window, swapchain and present work; fails on +1 of 255 in each channel of the first frame's clear colour, also with the upscaler off and with MoltenVK fast math off or on. Cause unknown; invisible but unexplained |
 | `--probe-astc` | passes, since the change to `trit_at` ([ASTC](#the-astc-compute-decoder-and-the-metal-compiler)) |
 | `--probe-ipc` | passes, since the audio frame gap applies on macOS too ([What else the first runs showed](#what-else-the-first-runs-showed)). The `lm` fatal it prints is a deliberate check |
-| `--probe-vkexec`, `--probe-shader` | need the shader census, not run |
+| `--probe-shader` | passes, with the census below |
+| `--probe-vkexec` | not run since the census |
+| `tools/shader_census.py --version v143 --translate` | 12,454 shaders (bnsh 8,311, sharcb 4,103, main 40) translated on macOS in 183 s: 0 failed, 0 `spirv-val` errors |
 | Windows and Linux builds | not rebuilt: there is no such machine here. The shared edits are behind `__APPLE__` or expand to the same text, but they need a build on each |
 
 | Phase | Done when | State |
@@ -583,11 +595,12 @@ In the order it is likely to pay off:
    Include a `TOTK_AUDIO_DUMP` where the game uses reverb (a cave, a shrine) to check the frame seams.
 2. **ASTC while moving.** The GPU decoder runs now; measure what it saves while textures stream in, against
    `TOTK_ASTC=cpu`.
-3. **Two depth-only pipelines MoltenVK refuses** ([Frame rate](#frame-rate)). Log the vertex attribute formats with
-   the failure and get MoltenVK's own message (`MVK_CONFIG_LOG_LEVEL=2`, which goes to the terminal, not `totk.log`).
-   Then an interleaved run against `ub_overlay=0` and a new Metal System Trace to count the encoders a frame now.
-4. **Shader census.** Unblocks `--probe-vkexec` and `--probe-shader`, finds shaders Metal refuses before play, and lets
-   `tools/prepare_shaders.py` build pipelines at install time.
+3. **Count the encoders again**: an interleaved run against `ub_overlay=0` and a new Metal System Trace to count the
+   encoders a frame now.
+4. **Metal over the whole census.** The census translates cleanly; what is left is building every fragment shader
+   through Metal before play, to find the others this compiler refuses. `tools/prepare_shaders.py` would not do it:
+   without a graphics pipeline library it builds only compute variants, and translation stalls in play are small
+   (35-55 ms a session against 0.9-1.7 s of pipeline builds).
 5. **Windows and Linux builds** of this branch, before any of it goes upstream. CI runs only the content check.
 6. **Profile-guided optimisation** again once the CPU side limits the frame ([Frame rate](#frame-rate)).
 7. If a trace or compile failure points there: triangle fans as lists (`vk_exec_draw.c` `op_draw`), `Coherent` in

@@ -1043,6 +1043,53 @@ static void pin_subgroup32(VkPipelineShaderStageCreateInfo *st, VkPipelineShader
     st->pNext = rq;
 }
 
+#ifdef __APPLE__
+// Every OpKill of a fragment shader as OpDemoteToHelperInvocation followed by OpReturn, or NULL when the module has
+// no OpKill or more than one function (an OpReturn then ends only the function the kill is in). Apple's Metal compiler
+// for AMD GPUs crashes ("Compiler encountered an internal error", vkCreateGraphicsPipelines -3) on some fragment
+// shaders whose discards let the code below them run on: SPIRV-Cross writes OpKill as discard_fragment() alone and
+// the structured code falls through to what follows, here the translator's alpha tests one after another and a final
+// dither (two such depth-only foliage shaders of 1.4.3). Written discard_fragment(); return out; the same functions
+// build. A demoted invocation that returns at once writes nothing, as a killed one; the device enables
+// shaderDemoteToHelperInvocation with every other feature it reports (vk_device.c).
+static uint32_t *spirv_kill_return(const uint32_t *w, uint64_t n, uint64_t *out_n) {
+    enum { OP_EXTENSION = 10, OP_CAPABILITY = 17, OP_KILL = 252, OP_RETURN = 253, OP_DEMOTE = 5380, CAP_DEMOTE = 5379 };
+    static const char ext[] = "SPV_EXT_demote_to_helper_invocation";   // 35 characters: 9 words with the NUL
+    const uint32_t ext_words = (uint32_t)(sizeof ext + 3) / 4;
+    uint64_t kills = 0, functions = 0, caps_end = 0;
+    int have_cap = 0;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (!len || i + len > n) return NULL;
+        if (op == OP_KILL) kills++;
+        else if (op == SPV_OP_FUNCTION) functions++;
+        else if (op == OP_CAPABILITY) {
+            caps_end = i + len;
+            if (len >= 2 && w[i + 1] == CAP_DEMOTE) have_cap = 1;
+        }
+        i += len;
+    }
+    if (!kills || functions != 1 || !caps_end) return NULL;
+    uint64_t extra = kills + (have_cap ? 0 : 2 + 1 + ext_words);
+    uint32_t *o = malloc((n + extra) * 4), *p = o;
+    if (!o) return NULL;
+    memcpy(p, w, 5 * 4), p += 5;
+    for (uint64_t i = 5; i < n;) {
+        uint32_t op = w[i] & 0xffff, len = w[i] >> 16;
+        if (op == OP_KILL) *p++ = 1u << 16 | OP_DEMOTE, *p++ = 1u << 16 | OP_RETURN;
+        else memcpy(p, w + i, len * 4), p += len;
+        i += len;
+        if (i == caps_end && !have_cap) {   // after the last capability, before the extensions
+            *p++ = 2u << 16 | OP_CAPABILITY, *p++ = CAP_DEMOTE;
+            *p++ = (1 + ext_words) << 16 | OP_EXTENSION;
+            memset(p, 0, ext_words * 4), memcpy(p, ext, sizeof ext), p += ext_words;
+        }
+    }
+    *out_n = (uint64_t)(p - o);
+    return o;
+}
+#endif
+
 static VkShaderModule make_module(const uint32_t *w, uint64_t words) {
     uint64_t fixed_n = 0;
     uint32_t *fixed = spirv_fixup(w, words, &fixed_n);
@@ -1531,6 +1578,8 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     uint64_t vw, fw;
     const uint32_t *vcode = gfx_shader_spirv(s->vs, &vw);
     uint32_t *vpatched = NULL, *fpatched = NULL;
+    const uint32_t *fsrc = NULL;   // the fragment module's code, kept for a retry (spirv_kill_return)
+    uint64_t fsrc_n = 0;
     if (l->set1) {   // independent layouts: outputs from the vertex shader's union, not from this fragment shader
         GfxShaderIo fin[32];
         uint32_t missing = vs_union_missing(s, fin);
@@ -1569,10 +1618,10 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
             fcode = fpatched = r;
         }
         // A bound colour target outside the shader's output map gets write mask 0 (target_wmask)
-        if (fcode) fm = make_module(fcode, fw);
+        if (fcode) fm = make_module(fcode, fw), fsrc = fcode, fsrc_n = fw;
     }
     vm = make_module(vcode, vw);
-    free(vpatched), free(fpatched);
+    free(vpatched);
     VkPipeline pipe = VK_NULL_HANDLE;
     if (!vm || (s->fs && !fm)) goto out;
 
@@ -1646,6 +1695,28 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
     plat_mutex_lock_shared(&cache_use);
     VkResult r = vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe);
     plat_mutex_unlock_shared(&cache_use);
+#ifdef __APPLE__
+    if (r == VK_ERROR_INITIALIZATION_FAILED && fsrc) {   // Metal refused it: once more with returning discards
+        uint64_t kn = 0;
+        uint32_t *kr = spirv_kill_return(fsrc, fsrc_n, &kn);
+        VkShaderModule km = kr ? make_module(kr, kn) : VK_NULL_HANDLE;
+        free(kr);
+        if (km) {
+            stages[1].module = km;
+            plat_mutex_lock_shared(&cache_use);
+            r = vkCreateGraphicsPipelines(P.device, P.cache, 1, &pi, NULL, &pipe);
+            plat_mutex_unlock_shared(&cache_use);
+            stages[1].module = fm;
+            vkDestroyShaderModule(P.device, km, NULL);
+            const uint8_t *kf = gfx_shader_key(s->fs);
+            rt_log("vk_pipeline: fragment shader %02x%02x%02x%02x%02x%02x%02x%02x rebuilt with each discard returning at "
+                   "once: %s", kf[0], kf[1], kf[2], kf[3], kf[4], kf[5], kf[6], kf[7],
+                   r == VK_SUCCESS ? "the pipeline builds" : "still refused");
+        }
+    }
+#else
+    (void)fsrc, (void)fsrc_n;
+#endif
     perf_end(PERF_PIPE, p0);   // counts on the render thread only, so background builds stay out of it
     if (r != VK_SUCCESS) {
         // Names the pipeline, so a failure the driver does not explain (MoltenVK returns -3 when Metal rejects the
@@ -1659,6 +1730,14 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
                kf ? kf[6] : 0, kf ? kf[7] : 0, k->n_color, k->color[0], k->color[1], k->color[2], k->color[3],
                k->depth, k->stencil, k->samples, k->topo_class, k->poly_mode, k->logic_op, k->a2c, k->dsb, k->fbl,
                k->blend_en, k->wmask, k->clamp);
+        // The vertex attributes as the pipeline got them: location:format@binding+offset (VkFormat numbers; the zero
+        // binding is VK_PIPE_ZERO_BINDING). Metal refuses an attribute whose format does not read as the shader's type.
+        char attrs[32 * 24] = "";
+        size_t used = 0;
+        for (uint32_t i = 0; i < na && used < sizeof attrs; i++)
+            used += (size_t)snprintf(attrs + used, sizeof attrs - used, " %u:%u@%u+%u", va[i].location, (unsigned)va[i].format,
+                                     va[i].binding, va[i].offset);
+        rt_log("vk_pipeline:   its vertex attributes:%s%s", na ? attrs : " none", P.dyn_vi ? " (dynamic vertex input)" : "");
         pipe = VK_NULL_HANDLE;
     } else {
         perf_count(PERF_CNT_PIPE_BUILT);
@@ -1666,6 +1745,7 @@ static VkPipeline create_graphics(const VkPipeState *s, const GKey *k, const Lay
 out:
     if (vm) vkDestroyShaderModule(P.device, vm, NULL);
     if (fm) vkDestroyShaderModule(P.device, fm, NULL);
+    free(fpatched);
     return pipe;
 }
 
